@@ -13,13 +13,23 @@ import time
 import threading
 import os
 import sys
+import logging
+from typing import Optional, Tuple, List, Dict, Any
+
+# Configuracao de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger('USG_FLOW')
 
 # Inicializar NSApplication para controle de fullscreen no macOS
 try:
     from AppKit import NSApplication
     NSApplication.sharedApplication()
-except:
-    pass
+except ImportError:
+    pass  # AppKit não disponível (não é macOS ou não instalado)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
@@ -28,34 +38,203 @@ from src.clip_recorder import ClipRecorder
 
 
 # =============================================================================
-# CAPTURA EM THREAD SEPARADO
+# CAPTURA EM THREAD SEPARADO (OTIMIZADA)
 # =============================================================================
 class CapturaThread(threading.Thread):
-    def __init__(self):
+    """Thread de captura otimizada com buffer circular e lock minimo."""
+
+    def __init__(self, buffer_size: int = 2) -> None:
         super().__init__(daemon=True)
-        self.frame = None
-        self.lock = threading.Lock()
-        self.running = True
-        self.connected = False
+        self._frame: Optional[np.ndarray] = None
+        self._lock: threading.Lock = threading.Lock()
+        self._running: bool = True
+        self._connected: bool = False
+        self._frame_count: int = 0
+        self._last_frame_time: float = 0
 
-    def run(self):
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def run(self) -> None:
         cap = WindowCapture("AIRPLAY")
-        while self.running:
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                with self.lock:
-                    self.frame = frame
-                    self.connected = True
-            else:
-                self.connected = False
-                time.sleep(0.02)
+        consecutive_fails = 0
 
-    def get_frame(self):
-        with self.lock:
-            return self.frame.copy() if self.frame is not None else None
+        while self._running:
+            try:
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    # Lock minimo - apenas para atribuicao
+                    with self._lock:
+                        self._frame = frame
+                        self._connected = True
+                    self._frame_count += 1
+                    self._last_frame_time = time.time()
+                    consecutive_fails = 0
+                else:
+                    consecutive_fails += 1
+                    self._connected = False
+                    # Sleep exponencial para economizar CPU quando desconectado
+                    # Começa em 10ms, dobra até max 500ms
+                    sleep_time = min(0.5, 0.01 * (2 ** min(consecutive_fails, 6)))
+                    time.sleep(sleep_time)
+            except Exception as e:
+                self._connected = False
+                logger.error(f"Captura: {type(e).__name__}: {e}")
+                time.sleep(0.1)
+
+    def get_frame(self) -> Optional[np.ndarray]:
+        """Retorna frame atual (copia para thread safety)."""
+        with self._lock:
+            if self._frame is not None:
+                return self._frame.copy()
+            return None
+
+    def get_frame_if_new(self, last_count: int) -> Tuple[Optional[np.ndarray], int]:
+        """Retorna frame apenas se for novo (evita copia desnecessaria)."""
+        if self._frame_count == last_count:
+            return None, last_count
+        with self._lock:
+            if self._frame is not None:
+                return self._frame.copy(), self._frame_count
+            return None, last_count
 
     def stop(self):
-        self.running = False
+        self._running = False
+
+
+# =============================================================================
+# PROCESSAMENTO AI EM THREAD SEPARADO (EVITA TRAVAMENTO)
+# =============================================================================
+class AIThread(threading.Thread):
+    """Thread dedicada para processamento AI - evita bloquear UI."""
+
+    def __init__(self) -> None:
+        super().__init__(daemon=True)
+        self._running: bool = True
+        self._input_frame: Optional[np.ndarray] = None
+        self._output_frame: Optional[np.ndarray] = None
+        self._roi: Optional[Tuple[int, int, int, int]] = None
+        self._lock: threading.Lock = threading.Lock()
+        self._new_frame_event: threading.Event = threading.Event()
+        self._ai: Optional[Any] = None  # AIProcessor quando carregado
+        self._processing: bool = False
+        self._last_process_time: float = 0
+        self._mode_changed: bool = False
+
+    def set_ai(self, ai: Any) -> None:
+        """Define o processador AI."""
+        with self._lock:
+            self._ai = ai
+            self._mode_changed = True
+            # Limpar resultados pendentes ao trocar AI
+            self._output_frame = None
+            self._input_frame = None
+
+    def reset(self) -> None:
+        """Reseta estado da thread (usar ao trocar de modo)."""
+        with self._lock:
+            self._output_frame = None
+            self._input_frame = None
+            self._mode_changed = True
+
+    def submit_frame(self, frame: np.ndarray, roi: Optional[Tuple[int, int, int, int]] = None) -> bool:
+        """Submete frame para processamento (non-blocking)."""
+        if self._processing:
+            return False  # Ainda processando anterior
+
+        with self._lock:
+            self._input_frame = frame.copy()
+            self._roi = roi
+        self._new_frame_event.set()
+        return True
+
+    def get_result(self) -> Optional[np.ndarray]:
+        """Retorna resultado do processamento (ou None se nao pronto)."""
+        with self._lock:
+            if self._output_frame is not None:
+                result = self._output_frame
+                self._output_frame = None
+                return result
+        return None
+
+    @property
+    def is_processing(self) -> bool:
+        return self._processing
+
+    @property
+    def last_process_time(self) -> float:
+        """Tempo do ultimo processamento em ms."""
+        return self._last_process_time
+
+    def run(self) -> None:
+        while self._running:
+            # Esperar por novo frame (com timeout para permitir shutdown)
+            if not self._new_frame_event.wait(timeout=0.1):
+                continue
+
+            self._new_frame_event.clear()
+            self._processing = True
+
+            try:
+                with self._lock:
+                    frame = self._input_frame
+                    roi = self._roi
+                    self._input_frame = None
+                    mode_changed = self._mode_changed
+                    self._mode_changed = False
+
+                # Se modo mudou, ignorar frame pendente
+                if mode_changed and frame is not None:
+                    # Pegar frame novo apos mudanca de modo
+                    pass
+
+                if frame is not None and self._ai is not None:
+                    start = time.time()
+
+                    try:
+                        if roi:
+                            # Processar apenas ROI
+                            rx, ry, rw, rh = roi
+                            h, w = frame.shape[:2]
+                            rx = max(0, min(rx, w - 1))
+                            ry = max(0, min(ry, h - 1))
+                            rw = max(USGApp.MIN_ROI_SIZE, min(rw, w - rx))
+                            rh = max(USGApp.MIN_ROI_SIZE, min(rh, h - ry))
+
+                            if rw > USGApp.MIN_ROI_SIZE and rh > USGApp.MIN_ROI_SIZE:
+                                roi_frame = frame[ry:ry+rh, rx:rx+rw].copy()
+                                roi_processed = self._ai.process(roi_frame)
+                                # Garantir que dimensoes batem
+                                if roi_processed.shape[:2] == (rh, rw):
+                                    frame[ry:ry+rh, rx:rx+rw] = roi_processed
+                                # Desenhar borda da ROI
+                                cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (0, 255, 255), 2)
+                        else:
+                            # Processar frame inteiro
+                            frame = self._ai.process(frame)
+
+                        self._last_process_time = (time.time() - start) * 1000
+
+                        with self._lock:
+                            self._output_frame = frame
+
+                    except Exception as e:
+                        print(f"AI Process Error: {e}")
+                        # Em caso de erro, retornar frame original
+                        with self._lock:
+                            self._output_frame = frame
+
+            except Exception as e:
+                print(f"AI Thread Error: {e}")
+                import traceback
+                traceback.print_exc()
+
+            self._processing = False
+
+    def stop(self):
+        self._running = False
+        self._new_frame_event.set()  # Desbloquear wait
 
 
 # =============================================================================
@@ -170,6 +349,23 @@ class USGApp:
     ]
 
     SIDEBAR_W = 280  # Sidebar premium (mais larga para melhor legibilidade)
+    MIN_ROI_SIZE = 20  # Tamanho minimo para ROI valida (pixels)
+    MIN_ROI_GRID = 100  # Tamanho minimo para mostrar grid de tercos
+
+    # Mapeamento centralizado: plugin_idx -> nome do modo AI
+    # Indices correspondem a MODOS[1:] (excluindo B-MODE que é indice 0)
+    AI_MODE_MAP = {
+        0: 'needle',   # NEEDLE
+        1: 'nerve',    # NERVE
+        2: 'cardiac',  # CARDIAC
+        3: 'fast',     # FAST
+        4: 'segment',  # ANATOMY
+        5: 'm_mode',   # M-MODE
+        6: 'color',    # COLOR
+        7: 'power',    # POWER
+        8: 'b_lines',  # LUNG
+        9: 'bladder',  # BLADDER
+    }
 
     def __init__(self):
         # Estado principal - GRUPO EXCLUSIVO
@@ -226,8 +422,16 @@ class USGApp:
         self.display_offset_x = 0
         self.display_offset_y = 0
 
-        # AI
+        # Cache de canvas para evitar realocacoes a cada frame
+        self._canvas_cache = None
+        self._canvas_size = (0, 0)
+
+        # AI (thread separada para nao bloquear UI)
         self.ai = None
+        self.ai_loading = False  # Flag para indicar carregamento
+        self.ai_thread = AIThread()
+        self.ai_thread.start()
+        self._last_ai_frame = None  # Cache do ultimo frame processado
 
         # Gravacao
         self.recorder = ClipRecorder(output_dir="captures", fps=30)
@@ -236,6 +440,7 @@ class USGApp:
         self.captura = CapturaThread()
         self.captura.start()
         self.frame_original = None
+        self._last_frame_count = 0  # Para detectar frames novos
 
         # Janela
         self.janela = "USG FLOW"
@@ -607,9 +812,15 @@ class USGApp:
             print("B-MODE")
 
         elif mode == 1:  # IA ZONE
-            self.process_roi = None
-            self.selecting_roi = True
-            print("IA ZONE - arraste na imagem para selecionar região")
+            # Manter ROI existente se houver, senao iniciar selecao
+            if self.process_roi is None:
+                self.selecting_roi = True
+                print("IA ZONE - arraste na imagem para selecionar região")
+            else:
+                self.selecting_roi = False
+                print(f"IA ZONE - usando ROI existente")
+            # Carregar AI para que esteja pronta quando ROI for selecionada
+            self._load_ai_if_needed()
 
         elif mode == 2:  # IA FULL
             self.process_roi = None
@@ -630,34 +841,38 @@ class USGApp:
         self.plugin_idx = idx
         self._invalidate_sidebar()
         nome = self.MODOS[idx + 1][0]
-        print(f"Plugin: {nome}")
+        logger.debug(f"Plugin: {nome}")
+
+        # Se estiver em modo IA (ZONE ou FULL), garantir que AI esta carregada
+        if self.source_mode > 0:
+            self._load_ai_if_needed()
 
         # Configurar modo na IA
-        mode_map = {
-            0: 'needle', 1: 'nerve', 2: 'cardiac', 3: 'fast',
-            4: 'segment', 5: 'm_mode', 6: 'color', 7: 'power',
-            8: 'b_lines', 9: 'bladder'
-        }
-
         if self.ai:
-            self.ai.set_mode(mode_map.get(idx, 'needle'))
+            new_mode = self.AI_MODE_MAP.get(idx, 'needle')
+            self.ai.set_mode(new_mode)
+            # Resetar thread para limpar frames do modo anterior
+            self.ai_thread.reset()
+            logger.debug(f"AI modo: {new_mode}")
 
     def _load_ai_if_needed(self):
         """Carrega a IA se ainda não foi carregada"""
-        if self.ai is None:
+        if self.ai is None and not self.ai_loading:
+            self.ai_loading = True
+            self._invalidate_sidebar()
             try:
                 from src.ai_processor import AIProcessor
                 self.ai = AIProcessor()
-                # Configurar plugin atual
-                mode_map = {
-                    0: 'needle', 1: 'nerve', 2: 'cardiac', 3: 'fast',
-                    4: 'segment', 5: 'm_mode', 6: 'color', 7: 'power',
-                    8: 'b_lines', 9: 'bladder'
-                }
-                self.ai.set_mode(mode_map.get(self.plugin_idx, 'needle'))
-                print("IA carregada")
+                # Configurar na thread de AI
+                self.ai_thread.set_ai(self.ai)
+                # Configurar plugin atual usando mapeamento centralizado
+                self.ai.set_mode(self.AI_MODE_MAP.get(self.plugin_idx, 'needle'))
+                logger.info("IA carregada (thread separada)")
             except Exception as e:
-                print(f"Erro ao carregar IA: {e}")
+                logger.error(f"Erro ao carregar IA: {e}", exc_info=True)
+            finally:
+                self.ai_loading = False
+                self._invalidate_sidebar()
 
     def _toggle_pause(self):
         self.pause = not self.pause
@@ -714,7 +929,7 @@ class USGApp:
             # OpenCV espera pontos (points), nao pixels fisicos
             return int(frame.size.width), int(frame.size.height)
         except Exception as e:
-            print(f"Erro ao obter tamanho da tela: {e}")
+            logger.warning(f"Erro ao obter tamanho da tela: {e}")
             return 1920, 1080  # Fallback
 
     def _zoom_in(self):
@@ -894,14 +1109,43 @@ class USGApp:
         source_cors = [(140, 140, 160), (255, 200, 60), (100, 220, 140)]
         modo_nome = source_names[self.source_mode]
         modo_cor = source_cors[self.source_mode]
-        if self.source_mode > 0:
+
+        # Indicador de carregamento de IA
+        if self.ai_loading:
+            # Animacao de loading (pontos rotativos)
+            dots = '.' * (int(time.time() * 3) % 4)
+            cv2.putText(sidebar, f"Loading AI{dots}", (180, sy),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.3, (255, 200, 60), 1, cv2.LINE_AA)
+        elif self.source_mode > 0:
             modo_nome = f"{modo_nome} | {self.MODOS[self.plugin_idx + 1][0]}"
+            # Tempo de processamento AI
+            ai_time = self.ai_thread.last_process_time
+            if ai_time > 0:
+                ai_time_cor = (100, 220, 100) if ai_time < 50 else (0, 180, 220) if ai_time < 100 else (100, 100, 200)
+                cv2.putText(sidebar, f"AI: {ai_time:.0f}ms", (180, sy), cv2.FONT_HERSHEY_DUPLEX, 0.3, ai_time_cor, 1, cv2.LINE_AA)
         cv2.putText(sidebar, modo_nome, (38, sy), cv2.FONT_HERSHEY_DUPLEX, 0.38, modo_cor, 1, cv2.LINE_AA)
 
-        # REC piscando
-        if self.recording and int(time.time() * 2) % 2:
-            cv2.circle(sidebar, (self.SIDEBAR_W - 22, footer_y + 18), 5, (0, 0, 255), -1)
-            cv2.putText(sidebar, "REC", (self.SIDEBAR_W - 55, footer_y + 22), cv2.FONT_HERSHEY_DUPLEX, 0.35, (0, 0, 255), 1, cv2.LINE_AA)
+        # REC com tempo de gravacao
+        if self.recording:
+            status = self.recorder.get_recording_status()
+            elapsed = status.get('elapsed_seconds', 0)
+            max_dur = status.get('max_duration', 30)
+
+            # Indicador piscante
+            if int(time.time() * 2) % 2:
+                cv2.circle(sidebar, (38, footer_y + 42), 5, (0, 0, 255), -1)
+
+            # Tempo formatado (MM:SS)
+            mins, secs = divmod(int(elapsed), 60)
+            time_str = f"REC {mins:02d}:{secs:02d}"
+            cv2.putText(sidebar, time_str, (52, footer_y + 46),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.35, (0, 0, 255), 1, cv2.LINE_AA)
+
+            # Barra de progresso do tempo restante
+            progress = min(elapsed / max_dur, 1.0)
+            bar_w = int(80 * progress)
+            cv2.rectangle(sidebar, (140, footer_y + 39), (220, footer_y + 47), (30, 30, 40), -1)
+            cv2.rectangle(sidebar, (140, footer_y + 39), (140 + bar_w, footer_y + 47), (0, 0, 255), -1)
 
         return sidebar
 
@@ -942,7 +1186,7 @@ class USGApp:
                 cv2.putText(frame, texto2, ((w - tw2) // 2, ty + 40), cv2.FONT_HERSHEY_DUPLEX, 0.5, (150, 150, 150), 1, cv2.LINE_AA)
             return frame
 
-        if rw < 5 or rh < 5:
+        if rw < self.MIN_ROI_SIZE or rh < self.MIN_ROI_SIZE:
             return frame
 
         # ═══════════════════════════════════════
@@ -1026,7 +1270,7 @@ class USGApp:
         # ═══════════════════════════════════════
         # GRID DE REGRA DOS TERÇOS (linhas sutis)
         # ═══════════════════════════════════════
-        if rw > 100 and rh > 100:  # Só mostrar se ROI for grande o suficiente
+        if rw > self.MIN_ROI_GRID and rh > self.MIN_ROI_GRID:  # Grid de tercos
             third_color = (60, 60, 60)
             # Linhas verticais (terços)
             for i in [1, 2]:
@@ -1140,7 +1384,7 @@ class USGApp:
         return frame
 
     def _desenhar_instrucoes(self, frame):
-        """Desenha instrucoes contextuais na parte inferior."""
+        """Desenha instrucoes contextuais na parte inferior - OTIMIZADO."""
         if not self.show_instructions or not self.show_overlays:
             return frame
 
@@ -1155,15 +1399,15 @@ class USGApp:
         if not instrucao:
             return frame
 
-        # Fundo semi-transparente
-        overlay = frame.copy()
-        box_h = 50
-        cv2.rectangle(overlay, (0, h - box_h), (w, h), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        # Fundo semi-transparente OTIMIZADO (blend apenas na area necessaria)
+        box_h = 40
+        roi = frame[h - box_h:h, 0:w]
+        # Escurecer apenas a ROI (mais rapido que full blend)
+        roi[:] = (roi * 0.3).astype(np.uint8)
 
         # Texto
-        cv2.putText(frame, instrucao, (20, h - 18),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, instrucao, (20, h - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 255), 1, cv2.LINE_AA)
 
         return frame
 
@@ -1247,51 +1491,62 @@ class USGApp:
         return cropped
 
     def rodar(self):
-        """Loop principal."""
+        """Loop principal OTIMIZADO - non-blocking AI, cache de sidebar."""
         frame_count = 0
         fps_time = time.time()
+        last_sidebar = None
+        last_sidebar_height = 0
+
+        # Variaveis para AI non-blocking
+        ai_submitted = False
+        ai_display_frame = None
 
         while self.running:
-            # Atualizar animacoes
-            self._update_transitions()
+            loop_start = time.time()
 
-            # Captura
+            # Atualizar animacoes (apenas se necessario)
+            if self.transition_alpha != self.transition_target:
+                self._update_transitions()
+
+            # Captura (otimizada - so copia se frame novo)
             if not self.pause:
-                f = self.captura.get_frame()
-                if f is not None:
-                    self.frame_original = f
+                new_frame, new_count = self.captura.get_frame_if_new(self._last_frame_count)
+                if new_frame is not None:
+                    self.frame_original = new_frame
+                    self._last_frame_count = new_count
                     if self.recording:
-                        self.recorder.add_frame(f)
+                        self.recorder.add_frame(new_frame)
 
             # Montar display
             if self.frame_original is not None:
                 h, w = self.frame_original.shape[:2]
 
-                # Imagem para display (COPIA do original)
-                display_img = self.frame_original.copy()
-
-                # AI (se IA ZONE ou IA FULL ativo)
+                # ══════════════════════════════════════════════════════════
+                # AI NON-BLOCKING (thread separada)
+                # ══════════════════════════════════════════════════════════
                 ia_ativa = self.source_mode > 0 and self.ai is not None
-                if ia_ativa:
-                    try:
-                        if self.source_mode == 1 and self.process_roi:
-                            # IA ZONE - processar apenas a ROI
-                            rx, ry, rw, rh = self.process_roi
-                            rx = max(0, min(rx, w))
-                            ry = max(0, min(ry, h))
-                            rw = min(rw, w - rx)
-                            rh = min(rh, h - ry)
 
-                            if rw > 10 and rh > 10:
-                                roi = display_img[ry:ry+rh, rx:rx+rw].copy()
-                                roi_processed = self.ai.process(roi)
-                                display_img[ry:ry+rh, rx:rx+rw] = roi_processed
-                                cv2.rectangle(display_img, (rx, ry), (rx+rw, ry+rh), (0, 255, 255), 2)
-                        elif self.source_mode == 2:
-                            # IA FULL - processar tudo
-                            display_img = self.ai.process(display_img)
-                    except Exception as e:
-                        pass
+                if ia_ativa:
+                    # Verificar se ha resultado pronto da AI thread
+                    ai_result = self.ai_thread.get_result()
+                    if ai_result is not None:
+                        ai_display_frame = ai_result
+                        ai_submitted = False
+
+                    # Submeter novo frame se nao esta processando
+                    if not ai_submitted and not self.ai_thread.is_processing:
+                        roi = self.process_roi if self.source_mode == 1 else None
+                        if self.ai_thread.submit_frame(self.frame_original, roi):
+                            ai_submitted = True
+
+                    # Usar ultimo frame processado ou original
+                    if ai_display_frame is not None:
+                        display_img = ai_display_frame.copy()
+                    else:
+                        display_img = self.frame_original.copy()
+                else:
+                    display_img = self.frame_original.copy()
+                    ai_display_frame = None  # Reset quando AI desativada
 
                 # Sistema profissional de seleção de ROI
                 if self.selecting_roi or (self.source_mode == 1 and self.process_roi):
@@ -1331,6 +1586,10 @@ class USGApp:
 
                 img_h, img_w = display_img.shape[:2]
 
+                # Proteger contra dimensões inválidas
+                if img_w < 1 or img_h < 1:
+                    continue
+
                 # Calcular escala mantendo proporção
                 scale = min(target_w / img_w, target_h / img_h)
                 new_w = int(img_w * scale)
@@ -1341,20 +1600,45 @@ class USGApp:
                 self.display_offset_x = (target_w - new_w) // 2
                 self.display_offset_y = (target_h - new_h) // 2
 
-                # Redimensionar
-                display_img = cv2.resize(display_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                # Redimensionar (usar INTER_AREA para downscale, INTER_LINEAR para upscale)
+                if new_w < img_w or new_h < img_h:
+                    display_img = cv2.resize(display_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                else:
+                    display_img = cv2.resize(display_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
-                # Criar canvas preto e centralizar imagem
-                canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-                canvas[:] = (12, 12, 15)  # Fundo escuro
+                # Reutilizar canvas se tamanho nao mudou (evita alocacao)
+                canvas_needed_size = (target_h, target_w)
+                if self._canvas_cache is None or self._canvas_size != canvas_needed_size:
+                    # Liberar canvas antigo explicitamente para evitar memory leak
+                    if self._canvas_cache is not None:
+                        del self._canvas_cache
+                    self._canvas_cache = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+                    self._canvas_size = canvas_needed_size
+                    # Preencher uma vez com cor de fundo
+                    self._canvas_cache[:] = (12, 12, 15)
+                else:
+                    # Limpar apenas area onde sera desenhada a imagem (mais rapido)
+                    self._canvas_cache[self.display_offset_y:self.display_offset_y+new_h,
+                                       self.display_offset_x:self.display_offset_x+new_w] = (12, 12, 15)
 
-                # Centralizar
-                canvas[self.display_offset_y:self.display_offset_y+new_h, self.display_offset_x:self.display_offset_x+new_w] = display_img
-                display_img = canvas
+                # Centralizar imagem no canvas
+                self._canvas_cache[self.display_offset_y:self.display_offset_y+new_h,
+                                   self.display_offset_x:self.display_offset_x+new_w] = display_img
+                display_img = self._canvas_cache
 
-                # Sidebar
+                # ══════════════════════════════════════════════════════════
+                # SIDEBAR COM CACHE (evita redesenho desnecessario)
+                # ══════════════════════════════════════════════════════════
                 if self.show_sidebar:
-                    sidebar = self._desenhar_sidebar(target_h, self.pulse_phase)
+                    # Redesenhar apenas se necessario
+                    if self._sidebar_dirty or last_sidebar is None or last_sidebar_height != target_h:
+                        sidebar = self._desenhar_sidebar(target_h, self.pulse_phase)
+                        last_sidebar = sidebar.copy()
+                        last_sidebar_height = target_h
+                        self._sidebar_dirty = False
+                    else:
+                        sidebar = last_sidebar
+
                     display = np.hstack([sidebar, display_img])
                 else:
                     display = display_img
@@ -1384,7 +1668,14 @@ class USGApp:
                             cv2.FONT_HERSHEY_DUPLEX, 0.4, (60, 60, 70), 1, cv2.LINE_AA)
 
                 if self.show_sidebar:
-                    sidebar = self._desenhar_sidebar(h, self.pulse_phase)
+                    if self._sidebar_dirty or last_sidebar is None or last_sidebar_height != h:
+                        sidebar = self._desenhar_sidebar(h, self.pulse_phase)
+                        last_sidebar = sidebar.copy()
+                        last_sidebar_height = h
+                        self._sidebar_dirty = False
+                    else:
+                        sidebar = last_sidebar
+
                     display = np.hstack([sidebar, espera])
                 else:
                     display = espera
@@ -1480,12 +1771,19 @@ class USGApp:
             elif k == ord('v'):
                 self._set_plugin(9)  # BLADDER
 
-        # Cleanup
+        # Cleanup - parar todas as threads
         if self.recording:
             self.recorder.stop_recording()
+        self.ai_thread.stop()
         self.captura.stop()
         cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
+    # Validar configuracao antes de iniciar
+    if not config.print_config_status():
+        print("ERRO CRITICO: Configuracao invalida. Corrija os erros acima.")
+        import sys
+        sys.exit(1)
+
     USGApp().rodar()

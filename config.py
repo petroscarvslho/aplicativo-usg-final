@@ -106,3 +106,96 @@ UI_SIMPLE = True         # True = UI otimizada
 SCREENSHOT_FORMAT = "PNG"
 VIDEO_QUALITY = "high"
 CAPTURES_DIR = "captures"
+
+
+# =============================================================================
+# VALIDACAO DE CONFIGURACAO
+# =============================================================================
+
+def validate_config():
+    """
+    Valida todas as configuracoes e retorna lista de erros/avisos.
+    Retorna: (is_valid: bool, errors: list, warnings: list)
+    """
+    import os
+
+    errors = []
+    warnings = []
+
+    # VIDEO_SOURCE
+    if isinstance(VIDEO_SOURCE, str) and VIDEO_SOURCE not in ("AIRPLAY",):
+        if not os.path.exists(VIDEO_SOURCE):
+            warnings.append(f"VIDEO_SOURCE '{VIDEO_SOURCE}' nao existe (arquivo de video)")
+    elif isinstance(VIDEO_SOURCE, int) and VIDEO_SOURCE < 0:
+        errors.append(f"VIDEO_SOURCE invalido: {VIDEO_SOURCE}")
+
+    # Resolucao
+    if FRAME_WIDTH < 320 or FRAME_WIDTH > 4096:
+        warnings.append(f"FRAME_WIDTH={FRAME_WIDTH} fora do range recomendado (320-4096)")
+    if FRAME_HEIGHT < 240 or FRAME_HEIGHT > 2160:
+        warnings.append(f"FRAME_HEIGHT={FRAME_HEIGHT} fora do range recomendado (240-2160)")
+    if FPS < 1 or FPS > 120:
+        warnings.append(f"FPS={FPS} fora do range recomendado (1-120)")
+
+    # AI
+    if AI_CONFIDENCE < 0.0 or AI_CONFIDENCE > 1.0:
+        errors.append(f"AI_CONFIDENCE={AI_CONFIDENCE} deve estar entre 0.0 e 1.0")
+    if AI_FRAME_SKIP < 1 or AI_FRAME_SKIP > 30:
+        warnings.append(f"AI_FRAME_SKIP={AI_FRAME_SKIP} fora do range recomendado (1-30)")
+
+    # YOLO Model
+    if YOLO_MODEL_PATH and not os.path.exists(YOLO_MODEL_PATH):
+        warnings.append(f"YOLO_MODEL_PATH '{YOLO_MODEL_PATH}' nao encontrado (AI usara fallback)")
+
+    # ROI
+    if USE_ROI:
+        if ROI_PRESET not in ("butterfly", "clarius", "custom"):
+            errors.append(f"ROI_PRESET '{ROI_PRESET}' invalido")
+        if ROI_PRESET == "custom":
+            if len(ROI_CUSTOM) != 4:
+                errors.append("ROI_CUSTOM deve ter 4 valores (x, y, w, h)")
+            else:
+                for val in ROI_CUSTOM:
+                    if not (0.0 <= val <= 1.0):
+                        errors.append(f"ROI_CUSTOM valores devem estar entre 0.0 e 1.0")
+                        break
+
+    # Screenshot/Video
+    if SCREENSHOT_FORMAT not in ("PNG", "BMP", "JPEG", "JPG"):
+        warnings.append(f"SCREENSHOT_FORMAT '{SCREENSHOT_FORMAT}' nao reconhecido")
+    if VIDEO_QUALITY not in ("lossless", "high", "medium", "light"):
+        warnings.append(f"VIDEO_QUALITY '{VIDEO_QUALITY}' nao reconhecido")
+
+    # Diretorio de capturas
+    if CAPTURES_DIR:
+        try:
+            os.makedirs(CAPTURES_DIR, exist_ok=True)
+        except Exception as e:
+            warnings.append(f"Nao foi possivel criar CAPTURES_DIR: {e}")
+
+    is_valid = len(errors) == 0
+    return is_valid, errors, warnings
+
+
+def print_config_status():
+    """Imprime status da validacao de configuracao."""
+    is_valid, errors, warnings = validate_config()
+
+    print("\n" + "=" * 50)
+    print("  CONFIG STATUS")
+    print("=" * 50)
+
+    if is_valid and not warnings:
+        print("  [OK] Todas configuracoes validas")
+    else:
+        if errors:
+            print("  [ERRO] Erros encontrados:")
+            for e in errors:
+                print(f"    - {e}")
+        if warnings:
+            print("  [AVISO] Avisos:")
+            for w in warnings:
+                print(f"    - {w}")
+
+    print("=" * 50 + "\n")
+    return is_valid
