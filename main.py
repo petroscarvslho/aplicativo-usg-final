@@ -98,14 +98,9 @@ class Botao:
 
     def desenhar(self, img, pulse_phase=0):
         if self.ativo:
-            # Efeito pulse nos botoes ativos
-            pulse = 0.7 + 0.3 * abs(np.sin(pulse_phase * np.pi * 2))
-            cor_ativo_pulse = tuple(int(c * pulse) for c in self.cor_ativo)
-            cv2.rectangle(img, (self.x, self.y), (self.x2, self.y2), cor_ativo_pulse, -1)
-            # Borda brilhante pulsante
-            border_brightness = int(200 + 55 * abs(np.sin(pulse_phase * np.pi * 2)))
-            cv2.rectangle(img, (self.x, self.y + 2), (self.x + 3, self.y2 - 2),
-                         (border_brightness, border_brightness, border_brightness), -1)
+            # Cor ativa sem efeito pulsante (visual estavel)
+            cv2.rectangle(img, (self.x, self.y), (self.x2, self.y2), self.cor_ativo, -1)
+            cv2.rectangle(img, (self.x, self.y + 2), (self.x + 3, self.y2 - 2), self.COR_ACCENT, -1)
             cor_texto = self.COR_TEXTO_ATIVO
             badge_cor = self.COR_BADGE_ATIVO
             tecla_cor = self.COR_TECLA_ATIVO
@@ -716,8 +711,10 @@ class USGApp:
             from AppKit import NSScreen
             screen = NSScreen.mainScreen()
             frame = screen.frame()
+            # OpenCV espera pontos (points), nao pixels fisicos
             return int(frame.size.width), int(frame.size.height)
-        except:
+        except Exception as e:
+            print(f"Erro ao obter tamanho da tela: {e}")
             return 1920, 1080  # Fallback
 
     def _zoom_in(self):
@@ -1174,46 +1171,53 @@ class USGApp:
         """Desenha modal de ajuda."""
         h, w = frame.shape[:2]
 
-        # Fundo escuro
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (w//5, h//8), (4*w//5, 7*h//8), (15, 15, 20), -1)
-        cv2.addWeighted(overlay, 0.95, frame, 0.05, 0, frame)
-        cv2.rectangle(frame, (w//5, h//8), (4*w//5, 7*h//8), (50, 50, 60), 2)
-
-        # Titulo
-        cv2.putText(frame, "ATALHOS DO TECLADO", (w//5 + 30, h//8 + 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 165, 0), 2, cv2.LINE_AA)
-
         # Lista de atalhos
         atalhos = [
             ("1", "B-MODE (sem IA)"),
             ("C", "IA ZONE (selecionar regiao)"),
             ("A", "IA FULL (IA em toda tela)"),
-            ("2-9, 0, V", "Selecionar plugin IA"),
+            ("2-9,0,V", "Selecionar plugin IA"),
             ("F", "Freeze/Pause"),
             ("R", "Iniciar/Parar gravacao"),
             ("S", "Screenshot (PNG)"),
             ("B", "Toggle Biplane"),
             ("H", "Esconder/Mostrar overlays"),
-            ("I", "Esconder/Mostrar instrucoes"),
             ("+/-", "Zoom In/Out"),
-            ("Setas", "Pan (mover imagem)"),
             ("?", "Esta ajuda"),
             ("X", "Fullscreen"),
             ("Q/ESC", "Sair"),
         ]
 
-        y = h//8 + 80
+        # Calcular tamanho do modal baseado no conteudo
+        num_items = len(atalhos)
+        line_h = min(26, max(18, (h - 150) // (num_items + 3)))
+        modal_h = min(h - 80, 60 + num_items * line_h + 40)
+        modal_w = min(w - 100, 450)
+        modal_x = (w - modal_w) // 2
+        modal_y = (h - modal_h) // 2
+
+        # Fundo escuro
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (modal_x, modal_y), (modal_x + modal_w, modal_y + modal_h), (15, 15, 20), -1)
+        cv2.addWeighted(overlay, 0.95, frame, 0.05, 0, frame)
+        cv2.rectangle(frame, (modal_x, modal_y), (modal_x + modal_w, modal_y + modal_h), (50, 50, 60), 2)
+
+        # Titulo
+        cv2.putText(frame, "ATALHOS DO TECLADO", (modal_x + 20, modal_y + 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 165, 0), 2, cv2.LINE_AA)
+
+        # Desenhar atalhos
+        y = modal_y + 65
         for tecla, desc in atalhos:
-            cv2.putText(frame, f"[{tecla}]", (w//5 + 30, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1, cv2.LINE_AA)
-            cv2.putText(frame, desc, (w//5 + 150, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
-            y += 28
+            cv2.putText(frame, f"[{tecla}]", (modal_x + 20, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1, cv2.LINE_AA)
+            cv2.putText(frame, desc, (modal_x + 120, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
+            y += line_h
 
         # Instrucao para fechar
-        cv2.putText(frame, "Pressione ? para fechar", (w//5 + 30, 7*h//8 - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (80, 80, 90), 1, cv2.LINE_AA)
+        cv2.putText(frame, "Pressione ? para fechar", (modal_x + 20, modal_y + modal_h - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (80, 80, 90), 1, cv2.LINE_AA)
 
         return frame
 
@@ -1316,11 +1320,13 @@ class USGApp:
                 if self.fullscreen:
                     # Fullscreen: usar tamanho da tela
                     screen_w, screen_h = self._get_screen_size()
-                    target_w = screen_w - (self.SIDEBAR_W if self.show_sidebar else 0)
+                    sidebar_w = self.SIDEBAR_W if self.show_sidebar else 0
+                    target_w = screen_w - sidebar_w
                     target_h = screen_h
                 else:
                     # Janela normal: 1400x800
-                    target_w = 1400 - (self.SIDEBAR_W if self.show_sidebar else 0)
+                    sidebar_w = self.SIDEBAR_W if self.show_sidebar else 0
+                    target_w = 1400 - sidebar_w
                     target_h = 800
 
                 img_h, img_w = display_img.shape[:2]
