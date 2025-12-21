@@ -365,7 +365,7 @@ class PremiumUI:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 1, cv2.LINE_AA)
 
     def draw_image_area(self, img, frame, app):
-        """Desenha area principal da imagem."""
+        """Desenha area principal da imagem SEM PERDA DE QUALIDADE."""
         if app.show_sidebar:
             area_w = self.width - self.sidebar_width - self.padding
         else:
@@ -376,10 +376,9 @@ class PremiumUI:
         area_y = self.header_height + self.padding // 2
 
         if frame is None:
-            # Tela de espera
             self.draw_waiting_screen(img, area_x, area_y, area_w, area_h)
         else:
-            # Processar e exibir imagem
+            # USAR FRAME ORIGINAL - SEM RESIZE para manter qualidade
             processed = frame.copy()
 
             # Aplicar IA se ativada
@@ -389,33 +388,39 @@ class PremiumUI:
                 except:
                     pass
 
-            # Calcular escala mantendo aspect ratio
             fh, fw = processed.shape[:2]
-            scale = min(area_w / fw, area_h / fh)
-            new_w = int(fw * scale)
-            new_h = int(fh * scale)
 
-            # Resize com melhor qualidade
-            if scale < 1:
-                processed = cv2.resize(processed, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            elif scale > 1:
-                processed = cv2.resize(processed, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            # Calcular posicao para centralizar (sem resize)
+            # Se imagem maior que area, faz crop centralizado
+            # Se menor, centraliza com padding
 
-            # Centralizar
-            x_offset = area_x + (area_w - new_w) // 2
-            y_offset = area_y + (area_h - new_h) // 2
+            if fw <= area_w and fh <= area_h:
+                # Imagem cabe - centralizar sem resize
+                x_offset = area_x + (area_w - fw) // 2
+                y_offset = area_y + (area_h - fh) // 2
+                display_w, display_h = fw, fh
+                display_frame = processed
+            else:
+                # Imagem maior - fazer resize APENAS se necessario
+                scale = min(area_w / fw, area_h / fh)
+                display_w = int(fw * scale)
+                display_h = int(fh * scale)
+                x_offset = area_x + (area_w - display_w) // 2
+                y_offset = area_y + (area_h - display_h) // 2
+                # Usar INTER_LANCZOS4 para melhor qualidade
+                display_frame = cv2.resize(processed, (display_w, display_h),
+                                          interpolation=cv2.INTER_LANCZOS4)
 
-            # Borda da imagem
-            border = 2
-            cv2.rectangle(img, (x_offset - border, y_offset - border),
-                          (x_offset + new_w + border, y_offset + new_h + border),
-                          self.c['border'], border)
+            # Borda
+            cv2.rectangle(img, (x_offset - 2, y_offset - 2),
+                          (x_offset + display_w + 2, y_offset + display_h + 2),
+                          self.c['border'], 2)
 
             # Colocar imagem
-            img[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = processed
+            img[y_offset:y_offset + display_h, x_offset:x_offset + display_w] = display_frame
 
-            # Overlay info no canto da imagem
-            self.draw_image_overlay(img, x_offset, y_offset, new_w, new_h, fw, fh, app)
+            # Overlay
+            self.draw_image_overlay(img, x_offset, y_offset, display_w, display_h, fw, fh, app)
 
     def draw_waiting_screen(self, img, x, y, w, h):
         """Desenha tela de espera animada."""
@@ -675,8 +680,14 @@ class USGFinal:
         cv2.namedWindow(config.WINDOW_NAME, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(config.WINDOW_NAME, self.window_width, self.window_height)
 
+        # Callback de mouse para cliques
+        cv2.setMouseCallback(config.WINDOW_NAME, self.mouse_callback)
+
+        # Areas clicaveis (serao calculadas pelo UI)
+        self.click_areas = []
+
         print("\n" + "=" * 60)
-        print("  PRONTO! Use H para ajuda")
+        print("  PRONTO! Use H para ajuda ou clique nos botoes")
         print("=" * 60 + "\n")
 
     def print_banner(self):
@@ -775,6 +786,56 @@ class USGFinal:
         config.VIDEO_SOURCE = sources[(idx + 1) % len(sources)]
         print(f"Camera: {config.VIDEO_SOURCE}")
         self.cap = VideoCapture(config.VIDEO_SOURCE)
+
+    def mouse_callback(self, event, x, y, flags, param):
+        """Callback para cliques do mouse."""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # Verificar clique nos botoes de modo
+            sidebar_x = self.window_width - self.ui.sidebar_width
+            btn_y = self.ui.header_height + 55
+
+            for i in range(len(self.modes)):
+                btn_x1 = sidebar_x + 15
+                btn_x2 = sidebar_x + self.ui.sidebar_width - 15
+                btn_y1 = btn_y
+                btn_y2 = btn_y + 40
+
+                if btn_x1 <= x <= btn_x2 and btn_y1 <= y <= btn_y2:
+                    self.set_mode(i)
+                    return
+
+                btn_y += 48
+
+            # Verificar clique nos controles
+            ctrl_y = btn_y + 40  # Depois da secao de modos
+
+            # Congelar
+            if sidebar_x + 15 <= x <= sidebar_x + self.ui.sidebar_width - 15:
+                if ctrl_y <= y <= ctrl_y + 32:
+                    self.freeze = not self.freeze
+                    return
+                ctrl_y += 38
+
+                # Gravar
+                if ctrl_y <= y <= ctrl_y + 32:
+                    if self.recording:
+                        self.stop_recording()
+                    else:
+                        self.start_recording()
+                    return
+                ctrl_y += 38
+
+                # IA
+                if ctrl_y <= y <= ctrl_y + 32:
+                    self.ai_enabled = not self.ai_enabled
+                    print(f"IA: {'ON' if self.ai_enabled else 'OFF'}")
+                    return
+                ctrl_y += 38
+
+                # Screenshot
+                if ctrl_y <= y <= ctrl_y + 32:
+                    self.screenshot()
+                    return
 
     def run(self):
         while self.running:
