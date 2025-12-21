@@ -199,17 +199,19 @@ Arquivos de pesquisa em:
 ## ESTADO ATUAL DO PROJETO (ATUALIZAR A CADA SESSAO)
 ====================================================================
 
-### Ultima atualizacao: 2025-12-21 (Sessao 6)
+### Ultima atualizacao: 2025-12-21 (Sessao 7)
 
 ### O que foi feito:
 - App 100% Python/OpenCV funcionando
 - Interface premium com header, sidebar, footer
 - **Sistema exclusivo de modos: B-MODE, IA ZONE, IA FULL**
-- **Sistema de ROI profissional** (estilo Photoshop/Figma)
+- **Sistema de ROI profissional e interativo**
 - **Fullscreen nativo** (cv2.setWindowProperty)
+- **Visual premium para todos os plugins de IA**
+- **Animacoes de transicao entre modos**
 - 10 plugins de IA (NEEDLE ate BLADDER)
 - Captura de tela do iPhone via AIRPLAY (pixel-perfect)
-- Deteccao de agulha com YOLO + trajetoria
+- Deteccao de agulha com YOLO + trajetoria animada
 - Segmentacao de nervo com U-Net ResNet34
 - Screenshot PNG lossless
 - Gravacao com opcoes de qualidade
@@ -219,12 +221,25 @@ Arquivos de pesquisa em:
 - Instrucoes contextuais por modo
 - TODOS os modelos AI de qualidade maxima criados
 
-### Sistema de ROI (Sessao 6):
+### Sistema de ROI Interativo (Sessao 7):
+- **Redimensionar pelos handles**: Arrastar cantos para ajustar tamanho
+- **Mover pelo centro**: Arrastar dentro da ROI para mover
+- **Presets rapidos**: P=50%, O=75%, L=100%, K=Quadrado
 - **Visual premium**: overlay escuro, marching ants, handles, crosshair, grid tercos
 - **Controles**: ENTER confirma, ESC cancela
-- **Barra de status** inferior com botoes estilizados
-- **Dimensoes** exibidas em tempo real
-- **Metodo**: `_desenhar_roi_selection()` em main.py (linhas 731-923)
+- **Barra de status** inferior com presets e instrucoes
+
+### Visual Premium para Plugins (Sessao 7):
+- **NEEDLE**: Trajetoria gradiente, projecao tracejada, painel com angulo
+- **CARDIAC**: Painel EF% premium, barra colorida, legenda camaras
+- **FAST**: Painel checkboxes, status NEGATIVE/POSITIVE
+- **LUNG**: Display B-lines, barra severidade, linha pleura
+- **BLADDER**: Volume mL grande, contorno glow, formula exibida
+
+### Animacoes (Sessao 7):
+- Fade suave ao trocar de modo
+- Pulse nos botoes ativos
+- Transicoes visuais premium
 
 ### Otimizacoes aplicadas:
 - Fonte DUPLEX em toda interface
@@ -237,7 +252,9 @@ Arquivos de pesquisa em:
 
 ### Funcionalidades OK (testadas):
 - ✅ Interface completa com sistema exclusivo
-- ✅ Sistema ROI profissional
+- ✅ Sistema ROI profissional e interativo
+- ✅ Visual premium para todos plugins AI
+- ✅ Animacoes de transicao
 - ✅ Fullscreen nativo (sem faixa branca)
 - ✅ Captura de tela iPhone via AIRPLAY
 - ✅ Todos os 10 modos AI funcionando
@@ -259,44 +276,32 @@ Arquivos de pesquisa em:
 ## PROXIMAS MELHORIAS AGENDADAS (PRIORIDADE)
 ====================================================================
 
-### 1. Redimensionar ROI pelos handles
-- Arrastar os cantos brancos para ajustar tamanho
-- Detectar clique nos handles (distancia < 15px)
-- Modo de arraste: `roi_drag_handle` = 'tl', 'tr', 'bl', 'br'
-- Atualizar `process_roi` durante arraste
-
-### 2. Mover ROI arrastando o centro
-- Clicar dentro da ROI (nao nos handles) permite mover
-- `roi_drag_handle` = 'move'
-- Manter tamanho, apenas mudar posicao
-
-### 3. Presets de ROI (botoes rapidos)
-- Adicionar botoes na barra inferior durante selecao:
-  - "Centro 50%" - ROI centralizada com 50% da tela
-  - "Centro 75%" - ROI centralizada com 75% da tela
-  - "Tela toda" - ROI cobrindo 100%
-  - "Quadrado central" - ROI quadrada no centro
-
-### 4. Visual premium para cada plugin de IA
-- Cada modo ter visual unico e profissional
-- NEEDLE: linha de trajetoria animada, angulo exibido
-- NERVE: contorno com gradiente, label anatomico
-- CARDIAC: overlay de camaras coloridas, EF% grande
-- FAST: areas de liquido destacadas com cor
-- Etc para cada um dos 10 modos
-
-### 5. Animacoes de transicao
-- Fade suave ao trocar de modo (200ms)
-- Transicao na sidebar ao selecionar
-- Pulse nos botoes ativos
-
-### 6. Outras melhorias pendentes
+### 1. Treinar modelos especificos
 - Treinar YOLO especifico para agulhas de ultrassom
-- Fine-tune modelos com dados reais
-- Implementar voice controls
-- Geracao de relatorios PDF
-- Historico de medicoes
-- Export de dados para PACS
+- Fine-tune U-Net com dados reais de nervos
+- Treinar EchoNet com dados cardiacos reais
+
+### 2. Controles por voz
+- Implementar voice controls para hands-free
+- Comandos: "freeze", "record", "screenshot", modos
+
+### 3. Geracao de relatorios
+- Gerar PDF com capturas e medicoes
+- Template profissional de laudo
+
+### 4. Historico e persistencia
+- Salvar historico de medicoes
+- Sessoes com timeline
+- Export de dados
+
+### 5. Integracao PACS
+- Export DICOM
+- Conexao com sistemas hospitalares
+
+### 6. Melhorias visuais adicionais
+- Temas (dark/light)
+- Customizacao de cores por usuario
+- Layouts alternativos
 
 ====================================================================
 

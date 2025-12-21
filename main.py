@@ -96,10 +96,16 @@ class Botao:
     def contem(self, px, py):
         return self.x <= px <= self.x2 and self.y <= py <= self.y2
 
-    def desenhar(self, img):
+    def desenhar(self, img, pulse_phase=0):
         if self.ativo:
-            cv2.rectangle(img, (self.x, self.y), (self.x2, self.y2), self.cor_ativo, -1)
-            cv2.rectangle(img, (self.x, self.y + 2), (self.x + 3, self.y2 - 2), self.COR_ACCENT, -1)
+            # Efeito pulse nos botoes ativos
+            pulse = 0.7 + 0.3 * abs(np.sin(pulse_phase * np.pi * 2))
+            cor_ativo_pulse = tuple(int(c * pulse) for c in self.cor_ativo)
+            cv2.rectangle(img, (self.x, self.y), (self.x2, self.y2), cor_ativo_pulse, -1)
+            # Borda brilhante pulsante
+            border_brightness = int(200 + 55 * abs(np.sin(pulse_phase * np.pi * 2)))
+            cv2.rectangle(img, (self.x, self.y + 2), (self.x + 3, self.y2 - 2),
+                         (border_brightness, border_brightness, border_brightness), -1)
             cor_texto = self.COR_TEXTO_ATIVO
             badge_cor = self.COR_BADGE_ATIVO
             tecla_cor = self.COR_TECLA_ATIVO
@@ -205,11 +211,20 @@ class USGApp:
         self.roi_end = None
         self.roi_confirmed = False  # ROI confirmada com ENTER
         self.roi_drag_handle = None  # Para redimensionar: 'tl', 'tr', 'bl', 'br', 'move'
+        self.roi_drag_start = None  # Posicao inicial do arraste
+        self.roi_original = None    # ROI original antes do arraste
         self.roi_animation_frame = 0  # Para marching ants
 
         # Cache da sidebar para performance
         self._sidebar_cache = None
         self._sidebar_dirty = True  # Força redesenho quando True
+
+        # Animacoes de transicao
+        self.transition_alpha = 1.0  # 0=escuro, 1=normal
+        self.transition_target = 1.0
+        self.transition_speed = 0.15  # Velocidade do fade
+        self.pulse_phase = 0  # Para animacao de pulse
+        self.last_mode_change = 0  # Timestamp da ultima mudanca
 
         # Info de escala para converter coordenadas
         self.display_scale = 1.0
@@ -362,7 +377,7 @@ class USGApp:
         # ═══════════════════════════════════════
         # SELEÇÃO DE ROI (para IA ZONE)
         # ═══════════════════════════════════════
-        if self.selecting_roi:
+        if self.selecting_roi or (self.source_mode == 1 and self.process_roi):
             if click_in_sidebar and event == cv2.EVENT_LBUTTONDOWN:
                 # Verificar se clicou em um botão de source (B-MODE, IA ZONE, IA FULL)
                 clicked_source = False
@@ -372,6 +387,7 @@ class USGApp:
                         self.selecting_roi = False
                         self.roi_start = None
                         self.roi_end = None
+                        self.roi_drag_handle = None
                         self._set_source_mode(i)
                         return
 
@@ -380,13 +396,14 @@ class USGApp:
                     self.selecting_roi = False
                     self.roi_start = None
                     self.roi_end = None
+                    self.roi_drag_handle = None
                     self.source_mode = 0
                     self._invalidate_sidebar()
                     print("Seleção cancelada")
                 return
 
             if not click_in_sidebar:
-                # Converter coordenadas
+                # Converter coordenadas display -> imagem
                 def display_to_image(dx, dy):
                     dx = dx - sidebar_w - self.display_offset_x
                     dy = dy - self.display_offset_y
@@ -394,29 +411,126 @@ class USGApp:
                         return max(0, int(dx / self.display_scale)), max(0, int(dy / self.display_scale))
                     return dx, dy
 
-                if event == cv2.EVENT_LBUTTONDOWN:
-                    self.roi_start = display_to_image(x, y)
-                    self.roi_end = self.roi_start
-                    self.process_roi = None  # Reset enquanto arrasta
-                elif event == cv2.EVENT_MOUSEMOVE and self.roi_start:
-                    self.roi_end = display_to_image(x, y)
-                    # Atualizar ROI em tempo real para preview
-                    x1, y1 = self.roi_start
-                    x2, y2 = self.roi_end
-                    if abs(x2 - x1) > 10 and abs(y2 - y1) > 10:
-                        self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
-                elif event == cv2.EVENT_LBUTTONUP and self.roi_start:
-                    self.roi_end = display_to_image(x, y)
-                    x1, y1 = self.roi_start
-                    x2, y2 = self.roi_end
-                    if abs(x2 - x1) > 30 and abs(y2 - y1) > 30:
-                        self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
-                        print(f"ROI selecionada: {self.process_roi[2]}x{self.process_roi[3]} - Pressione ENTER para confirmar")
-                    else:
+                img_x, img_y = display_to_image(x, y)
+
+                # Verificar se ROI já existe (para redimensionar/mover)
+                if self.process_roi:
+                    rx, ry, rw, rh = self.process_roi
+                    handle_dist = 15  # Distância máxima para detectar handle
+
+                    # Posições dos handles
+                    handles = {
+                        'tl': (rx, ry),           # Top-left
+                        'tr': (rx + rw, ry),      # Top-right
+                        'bl': (rx, ry + rh),      # Bottom-left
+                        'br': (rx + rw, ry + rh), # Bottom-right
+                    }
+
+                    if event == cv2.EVENT_LBUTTONDOWN:
+                        # Verificar clique nos handles
+                        for handle_name, (hx, hy) in handles.items():
+                            if abs(img_x - hx) < handle_dist and abs(img_y - hy) < handle_dist:
+                                self.roi_drag_handle = handle_name
+                                self.roi_drag_start = (img_x, img_y)
+                                self.roi_original = self.process_roi
+                                return
+
+                        # Verificar clique dentro da ROI (para mover)
+                        if rx < img_x < rx + rw and ry < img_y < ry + rh:
+                            self.roi_drag_handle = 'move'
+                            self.roi_drag_start = (img_x, img_y)
+                            self.roi_original = self.process_roi
+                            return
+
+                        # Clique fora da ROI - iniciar nova seleção
+                        self.roi_start = (img_x, img_y)
+                        self.roi_end = self.roi_start
                         self.process_roi = None
-                        print("Arraste para criar uma área maior (min 30x30)")
-                    self.roi_start = None
-                    self.roi_end = None
+
+                    elif event == cv2.EVENT_MOUSEMOVE:
+                        if self.roi_drag_handle and self.roi_original:
+                            ox, oy, ow, oh = self.roi_original
+                            sx, sy = self.roi_drag_start
+                            dx, dy = img_x - sx, img_y - sy
+
+                            if self.roi_drag_handle == 'move':
+                                # Mover toda a ROI
+                                self.process_roi = (ox + dx, oy + dy, ow, oh)
+                            elif self.roi_drag_handle == 'tl':
+                                # Redimensionar pelo canto superior-esquerdo
+                                new_x = ox + dx
+                                new_y = oy + dy
+                                new_w = ow - dx
+                                new_h = oh - dy
+                                if new_w > 30 and new_h > 30:
+                                    self.process_roi = (new_x, new_y, new_w, new_h)
+                            elif self.roi_drag_handle == 'tr':
+                                # Redimensionar pelo canto superior-direito
+                                new_y = oy + dy
+                                new_w = ow + dx
+                                new_h = oh - dy
+                                if new_w > 30 and new_h > 30:
+                                    self.process_roi = (ox, new_y, new_w, new_h)
+                            elif self.roi_drag_handle == 'bl':
+                                # Redimensionar pelo canto inferior-esquerdo
+                                new_x = ox + dx
+                                new_w = ow - dx
+                                new_h = oh + dy
+                                if new_w > 30 and new_h > 30:
+                                    self.process_roi = (new_x, oy, new_w, new_h)
+                            elif self.roi_drag_handle == 'br':
+                                # Redimensionar pelo canto inferior-direito
+                                new_w = ow + dx
+                                new_h = oh + dy
+                                if new_w > 30 and new_h > 30:
+                                    self.process_roi = (ox, oy, new_w, new_h)
+                        elif self.roi_start:
+                            self.roi_end = (img_x, img_y)
+                            x1, y1 = self.roi_start
+                            x2, y2 = self.roi_end
+                            if abs(x2 - x1) > 10 and abs(y2 - y1) > 10:
+                                self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+
+                    elif event == cv2.EVENT_LBUTTONUP:
+                        if self.roi_drag_handle:
+                            self.roi_drag_handle = None
+                            self.roi_drag_start = None
+                            self.roi_original = None
+                            if self.process_roi:
+                                print(f"ROI ajustada: {self.process_roi[2]}x{self.process_roi[3]}")
+                        elif self.roi_start:
+                            self.roi_end = (img_x, img_y)
+                            x1, y1 = self.roi_start
+                            x2, y2 = self.roi_end
+                            if abs(x2 - x1) > 30 and abs(y2 - y1) > 30:
+                                self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+                                print(f"ROI selecionada: {self.process_roi[2]}x{self.process_roi[3]} - Pressione ENTER para confirmar")
+                            else:
+                                print("Arraste para criar uma área maior (min 30x30)")
+                            self.roi_start = None
+                            self.roi_end = None
+                else:
+                    # Sem ROI - criar nova
+                    if event == cv2.EVENT_LBUTTONDOWN:
+                        self.roi_start = (img_x, img_y)
+                        self.roi_end = self.roi_start
+                    elif event == cv2.EVENT_MOUSEMOVE and self.roi_start:
+                        self.roi_end = (img_x, img_y)
+                        x1, y1 = self.roi_start
+                        x2, y2 = self.roi_end
+                        if abs(x2 - x1) > 10 and abs(y2 - y1) > 10:
+                            self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+                    elif event == cv2.EVENT_LBUTTONUP and self.roi_start:
+                        self.roi_end = (img_x, img_y)
+                        x1, y1 = self.roi_start
+                        x2, y2 = self.roi_end
+                        if abs(x2 - x1) > 30 and abs(y2 - y1) > 30:
+                            self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+                            print(f"ROI selecionada: {self.process_roi[2]}x{self.process_roi[3]} - Pressione ENTER para confirmar")
+                        else:
+                            print("Arraste para criar uma área maior (min 30x30)")
+                        self.roi_start = None
+                        self.roi_end = None
             return
 
         # ═══════════════════════════════════════
@@ -484,6 +598,11 @@ class USGApp:
         if mode == self.source_mode:
             return
 
+        # Iniciar transicao de fade
+        self.transition_alpha = 0.3
+        self.transition_target = 1.0
+        self.last_mode_change = time.time()
+
         self.source_mode = mode
         self._invalidate_sidebar()
 
@@ -507,6 +626,11 @@ class USGApp:
         """Define o plugin de IA selecionado"""
         if idx == self.plugin_idx:
             return
+
+        # Iniciar transicao de fade
+        self.transition_alpha = 0.4
+        self.transition_target = 1.0
+        self.last_mode_change = time.time()
 
         self.plugin_idx = idx
         self._invalidate_sidebar()
@@ -622,7 +746,64 @@ class USGApp:
         self.pan_y = 0
         print("View resetada")
 
-    def _desenhar_sidebar(self, altura):
+    def _update_transitions(self):
+        """Atualiza animacoes de transicao"""
+        # Atualizar fade
+        if self.transition_alpha < self.transition_target:
+            self.transition_alpha = min(self.transition_target,
+                                       self.transition_alpha + self.transition_speed)
+        elif self.transition_alpha > self.transition_target:
+            self.transition_alpha = max(self.transition_target,
+                                       self.transition_alpha - self.transition_speed)
+
+        # Atualizar pulse (ciclo de 0 a 1)
+        self.pulse_phase = (self.pulse_phase + 0.08) % 1.0
+
+    def _apply_transition_effect(self, frame):
+        """Aplica efeito de fade/transicao ao frame"""
+        if self.transition_alpha >= 0.99:
+            return frame
+
+        # Aplicar fade
+        output = frame.copy()
+        alpha = self.transition_alpha
+        output = cv2.convertScaleAbs(output, alpha=alpha, beta=0)
+        return output
+
+    def _apply_roi_preset(self, preset):
+        """Aplica um preset de ROI.
+        preset: '50%', '75%', '100%', 'square'
+        """
+        if self.frame_original is None:
+            return
+
+        h, w = self.frame_original.shape[:2]
+
+        if preset == '50%':
+            # ROI centralizada com 50% da tela
+            rw, rh = w // 2, h // 2
+            rx, ry = w // 4, h // 4
+        elif preset == '75%':
+            # ROI centralizada com 75% da tela
+            rw, rh = int(w * 0.75), int(h * 0.75)
+            rx, ry = (w - rw) // 2, (h - rh) // 2
+        elif preset == '100%':
+            # ROI cobrindo toda a tela
+            rx, ry = 0, 0
+            rw, rh = w, h
+        elif preset == 'square':
+            # ROI quadrada no centro (usa menor dimensao)
+            size = min(w, h) // 2
+            rx = (w - size) // 2
+            ry = (h - size) // 2
+            rw, rh = size, size
+        else:
+            return
+
+        self.process_roi = (rx, ry, rw, rh)
+        print(f"Preset ROI {preset}: {rw}x{rh} px")
+
+    def _desenhar_sidebar(self, altura, pulse_phase=0):
         sidebar = np.zeros((altura, self.SIDEBAR_W, 3), dtype=np.uint8)
         sidebar[:] = (15, 15, 20)
 
@@ -641,7 +822,7 @@ class USGApp:
         # ═══════════════════════════════════════
         for i, btn in enumerate(self.botoes_source):
             btn.ativo = (i == self.source_mode) or (i == 1 and self.selecting_roi)
-            btn.desenhar(sidebar)
+            btn.desenhar(sidebar, pulse_phase)
 
         # TÍTULO "PLUGINS IA"
         ia_ativa = self.source_mode > 0
@@ -657,7 +838,7 @@ class USGApp:
             btn.ativo = (i == self.plugin_idx) and ia_ativa
             if not ia_ativa:
                 btn.hover = False
-            btn.desenhar(sidebar)
+            btn.desenhar(sidebar, pulse_phase)
 
         # TÍTULO "RECORDING"
         cv2.line(sidebar, (30, self.recording_title_y), (self.SIDEBAR_W - 30, self.recording_title_y), (35, 35, 45), 1)
@@ -670,7 +851,7 @@ class USGApp:
                 btn.ativo = self.pause
             elif btn.texto == 'REC':
                 btn.ativo = self.recording
-            btn.desenhar(sidebar)
+            btn.desenhar(sidebar, pulse_phase)
 
         # TÍTULO "SYSTEM"
         cv2.line(sidebar, (30, self.system_title_y), (self.SIDEBAR_W - 30, self.system_title_y), (35, 35, 45), 1)
@@ -679,7 +860,7 @@ class USGApp:
 
         # Zoom
         for btn in self.botoes_view:
-            btn.desenhar(sidebar)
+            btn.desenhar(sidebar, pulse_phase)
 
         # Botões de sistema (FULLSCREEN, HELP, EXIT)
         for btn in self.botoes_ctrl[3:]:
@@ -687,7 +868,7 @@ class USGApp:
                 btn.ativo = self.fullscreen
             elif btn.texto == 'HELP':
                 btn.ativo = self.show_help
-            btn.desenhar(sidebar)
+            btn.desenhar(sidebar, pulse_phase)
 
         # FOOTER (mais compacto)
         footer_y = altura - 60
@@ -885,7 +1066,7 @@ class USGApp:
         # BARRA DE STATUS INFERIOR (premium)
         # ═══════════════════════════════════════
         if self.selecting_roi:
-            bar_h = 45
+            bar_h = 55
             bar_y = h - bar_h
 
             # Fundo gradiente simulado
@@ -896,24 +1077,68 @@ class USGApp:
             # Linha de separação
             cv2.line(frame, (0, bar_y), (w, bar_y), (0, 180, 200), 2)
 
-            # Ícones e texto
-            icon_y = bar_y + 28
-
             if self.process_roi:
-                # ROI definida - mostrar opções
+                # ROI definida - mostrar controles e presets
+                icon_y = bar_y + 22
+
                 # ENTER
-                cv2.rectangle(frame, (w//2 - 180, icon_y - 16), (w//2 - 100, icon_y + 8), (0, 150, 150), -1)
-                cv2.putText(frame, "ENTER", (w//2 - 172, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(frame, "Confirmar", (w//2 - 95, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.4, (150, 150, 150), 1, cv2.LINE_AA)
+                cv2.rectangle(frame, (20, icon_y - 14), (90, icon_y + 10), (0, 150, 150), -1)
+                cv2.putText(frame, "ENTER", (28, icon_y + 2), cv2.FONT_HERSHEY_DUPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, "Confirmar", (95, icon_y + 2), cv2.FONT_HERSHEY_DUPLEX, 0.35, (120, 120, 130), 1, cv2.LINE_AA)
 
                 # ESC
-                cv2.rectangle(frame, (w//2 + 20, icon_y - 16), (w//2 + 80, icon_y + 8), (100, 60, 60), -1)
-                cv2.putText(frame, "ESC", (w//2 + 32, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(frame, "Cancelar", (w//2 + 88, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.4, (150, 150, 150), 1, cv2.LINE_AA)
+                cv2.rectangle(frame, (180, icon_y - 14), (230, icon_y + 10), (100, 60, 60), -1)
+                cv2.putText(frame, "ESC", (192, icon_y + 2), cv2.FONT_HERSHEY_DUPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, "Cancelar", (235, icon_y + 2), cv2.FONT_HERSHEY_DUPLEX, 0.35, (120, 120, 130), 1, cv2.LINE_AA)
+
+                # Separador
+                cv2.line(frame, (320, bar_y + 10), (320, h - 10), (50, 50, 60), 1)
+
+                # Presets de ROI
+                cv2.putText(frame, "PRESETS:", (340, icon_y + 2), cv2.FONT_HERSHEY_DUPLEX, 0.35, (80, 80, 100), 1, cv2.LINE_AA)
+
+                preset_x = 420
+                presets = [
+                    ('P', '50%', (60, 140, 140)),
+                    ('O', '75%', (60, 140, 140)),
+                    ('L', '100%', (60, 140, 140)),
+                    ('K', 'SQ', (60, 140, 140)),
+                ]
+                for key, label, color in presets:
+                    cv2.rectangle(frame, (preset_x, icon_y - 14), (preset_x + 22, icon_y + 10), color, -1)
+                    cv2.putText(frame, key, (preset_x + 6, icon_y + 2), cv2.FONT_HERSHEY_DUPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame, label, (preset_x + 28, icon_y + 2), cv2.FONT_HERSHEY_DUPLEX, 0.35, (140, 140, 150), 1, cv2.LINE_AA)
+                    preset_x += 70
+
+                # Dicas de interação
+                icon_y2 = bar_y + 42
+                cv2.putText(frame, "Arraste os cantos para redimensionar | Arraste o centro para mover",
+                           (20, icon_y2), cv2.FONT_HERSHEY_DUPLEX, 0.32, (80, 80, 100), 1, cv2.LINE_AA)
             else:
-                # Sem ROI - instrução de arraste
+                # Sem ROI - instrução de arraste e presets
+                icon_y = bar_y + 22
+
                 cv2.putText(frame, "Clique e arraste para selecionar a regiao de interesse",
-                           (w//2 - 220, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.45, (150, 200, 200), 1, cv2.LINE_AA)
+                           (20, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.4, (150, 200, 200), 1, cv2.LINE_AA)
+
+                # Separador
+                cv2.line(frame, (420, bar_y + 10), (420, h - 10), (50, 50, 60), 1)
+
+                # Presets rapidos
+                cv2.putText(frame, "PRESETS:", (440, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.35, (80, 80, 100), 1, cv2.LINE_AA)
+
+                preset_x = 520
+                presets = [('P', '50%'), ('O', '75%'), ('L', '100%'), ('K', 'SQ')]
+                for key, label in presets:
+                    cv2.rectangle(frame, (preset_x, icon_y - 14), (preset_x + 22, icon_y + 10), (60, 140, 140), -1)
+                    cv2.putText(frame, key, (preset_x + 6, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame, label, (preset_x + 28, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.35, (140, 140, 150), 1, cv2.LINE_AA)
+                    preset_x += 65
+
+                # ESC
+                cv2.rectangle(frame, (w - 100, icon_y - 14), (w - 50, icon_y + 10), (100, 60, 60), -1)
+                cv2.putText(frame, "ESC", (w - 92, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, "Sair", (w - 45, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.35, (120, 120, 130), 1, cv2.LINE_AA)
 
         return frame
 
@@ -1023,6 +1248,9 @@ class USGApp:
         fps_time = time.time()
 
         while self.running:
+            # Atualizar animacoes
+            self._update_transitions()
+
             # Captura
             if not self.pause:
                 f = self.captura.get_frame()
@@ -1081,6 +1309,9 @@ class USGApp:
                 if self.show_overlays:
                     display_img = self._desenhar_instrucoes(display_img)
 
+                # Aplicar efeito de transicao (fade)
+                display_img = self._apply_transition_effect(display_img)
+
                 # Escalar imagem para preencher área disponível
                 if self.fullscreen:
                     # Fullscreen: usar tamanho da tela
@@ -1117,7 +1348,7 @@ class USGApp:
 
                 # Sidebar
                 if self.show_sidebar:
-                    sidebar = self._desenhar_sidebar(target_h)
+                    sidebar = self._desenhar_sidebar(target_h, self.pulse_phase)
                     display = np.hstack([sidebar, display_img])
                 else:
                     display = display_img
@@ -1147,7 +1378,7 @@ class USGApp:
                             cv2.FONT_HERSHEY_DUPLEX, 0.4, (60, 60, 70), 1, cv2.LINE_AA)
 
                 if self.show_sidebar:
-                    sidebar = self._desenhar_sidebar(h)
+                    sidebar = self._desenhar_sidebar(h, self.pulse_phase)
                     display = np.hstack([sidebar, espera])
                 else:
                     display = espera
@@ -1184,6 +1415,15 @@ class USGApp:
                     self.roi_confirmed = True
                     self._load_ai_if_needed()
                     print(f"ROI confirmada: {self.process_roi}")
+            # Presets de ROI (P=50%, O=75%, L=100%, K=Square)
+            elif k == ord('p') and self.selecting_roi:
+                self._apply_roi_preset('50%')
+            elif k == ord('o') and self.selecting_roi:
+                self._apply_roi_preset('75%')
+            elif k == ord('l') and self.selecting_roi:
+                self._apply_roi_preset('100%')
+            elif k == ord('k') and self.selecting_roi:
+                self._apply_roi_preset('square')
             elif k == ord('q'):
                 break
             elif k == ord('f'):

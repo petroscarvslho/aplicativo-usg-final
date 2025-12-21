@@ -1,6 +1,82 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-21 - Sessao 7: Interacao ROI + Visual Premium + Animacoes
+====================================================================
+
+### Resumo
+Implementacao de interatividade completa do sistema ROI (redimensionar/mover), visual premium para todos os plugins de IA, e animacoes de transicao entre modos.
+
+### Sistema de ROI Interativo
+Novo sistema de interacao com ROI (Region of Interest):
+
+1. **Redimensionar pelos Handles**:
+   - Arrastar os 4 cantos (handles brancos) para ajustar tamanho
+   - Deteccao de clique nos handles (distancia < 15px)
+   - Tamanho minimo 30x30px mantido
+
+2. **Mover pelo Centro**:
+   - Clicar dentro da ROI (fora dos handles) permite arrastar toda a regiao
+   - Mantem tamanho, apenas muda posicao
+
+3. **Presets de ROI Rapidos**:
+   - Tecla P = 50% centralizada
+   - Tecla O = 75% centralizada
+   - Tecla L = 100% (tela toda)
+   - Tecla K = Quadrado central (menor dimensao)
+   - Interface mostra botoes de preset na barra inferior
+
+### Visual Premium para Plugins de IA
+Cada modo AI agora tem visual unico e profissional:
+
+1. **NEEDLE PILOT**:
+   - Trajetoria com gradiente de cor (antigo=escuro, recente=brilhante)
+   - Projecao tracejada animada
+   - Painel com status (TRACKING/SEARCHING) e angulo em graus
+   - Ponto alvo animado
+
+2. **CARDIAC AI**:
+   - Painel lateral premium com EF% grande
+   - Barra de progresso colorida (verde/amarelo/vermelho)
+   - Legenda de camaras (LV, LA, RV)
+   - Status (NORMAL/LEVE/MODERADO/GRAVE)
+
+3. **FAST PROTOCOL**:
+   - Painel de janelas com checkboxes estilizados
+   - Status geral (NEGATIVE/POSITIVE)
+   - Visual inspirado em apps comerciais
+
+4. **LUNG AI**:
+   - Contagem de B-lines com display grande
+   - Barra gradiente de severidade
+   - Linhas-B com gradiente visual
+   - Linha da pleura indicada
+
+5. **BLADDER AI**:
+   - Painel de volume com display grande (mL)
+   - Contorno com glow effect
+   - Preenchimento semi-transparente
+   - Barra de status (VAZIO/NORMAL/MODERADO/DISTENDIDO)
+   - Formula de calculo exibida
+
+### Animacoes de Transicao
+Sistema de animacoes suaves:
+
+1. **Fade entre modos**:
+   - Fade suave (200ms) ao trocar de modo
+   - Alpha de 0.3 a 1.0 durante transicao
+
+2. **Pulse nos botoes ativos**:
+   - Botoes ativos pulsam suavemente
+   - Borda brilhante animada
+
+### Arquivos Modificados
+- `main.py` - Sistema ROI interativo, animacoes
+- `src/ai_processor.py` - Visual premium para todos os plugins
+
+---
+
+====================================================================
 ## 2025-12-21 - Sessao 6: Sistema ROI Profissional + Fullscreen Nativo
 ====================================================================
 

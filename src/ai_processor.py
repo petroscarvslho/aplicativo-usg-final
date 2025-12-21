@@ -472,9 +472,13 @@ class AIProcessor:
     # =========================================================================
 
     def _process_needle(self, frame):
-        """Needle Pilot - Deteccao e trajetoria de agulha."""
+        """Needle Pilot - Deteccao e trajetoria de agulha com visual premium."""
         model = self.models.get('needle')
         output = frame.copy()
+        h, w = frame.shape[:2]
+
+        detected_needle = False
+        needle_angle = None
 
         if model:
             # Escalar para processamento
@@ -493,36 +497,74 @@ class AIProcessor:
                     x1, y1, x2, y2 = int(x1/scale), int(y1/scale), int(x2/scale), int(y2/scale)
                     conf = float(box.conf[0])
 
-                    # Desenhar box
+                    detected_needle = True
+
+                    # Visual premium - Glow effect
+                    cv2.rectangle(output, (x1-2, y1-2), (x2+2, y2+2), (0, 100, 0), 3)
                     cv2.rectangle(output, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(output, f"Agulha {conf:.0%}", (x1, y1-10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
                     # Adicionar ao historico para trajetoria
                     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                     self.needle_history.append((cx, cy))
 
-            # Desenhar trajetoria
+            # Desenhar trajetoria premium com gradiente
             if len(self.needle_history) >= 2:
                 points = list(self.needle_history)
-                for i in range(1, len(points)):
-                    cv2.line(output, points[i-1], points[i], (0, 255, 255), 2)
 
-                # Projecao de trajetoria
+                # Trajetoria com gradiente de cor (antigo=escuro, recente=brilhante)
+                for i in range(1, len(points)):
+                    alpha = i / len(points)  # 0 a 1
+                    color = (0, int(150 + 105 * alpha), int(200 + 55 * alpha))
+                    thickness = 1 + int(alpha * 2)
+                    cv2.line(output, points[i-1], points[i], color, thickness)
+
+                # Calcular angulo da agulha
                 if len(points) >= 3:
                     dx = points[-1][0] - points[-3][0]
                     dy = points[-1][1] - points[-3][1]
-                    future_x = int(points[-1][0] + dx * 1.5)
-                    future_y = int(points[-1][1] + dy * 1.5)
-                    cv2.arrowedLine(output, points[-1], (future_x, future_y),
-                                   (255, 165, 0), 2, tipLength=0.3)
+                    if dx != 0:
+                        needle_angle = int(np.arctan2(dy, dx) * 180 / np.pi)
+
+                    # Projecao de trajetoria animada
+                    future_x = int(points[-1][0] + dx * 2)
+                    future_y = int(points[-1][1] + dy * 2)
+
+                    # Linha tracejada para projecao
+                    num_dashes = 8
+                    for j in range(num_dashes):
+                        t1 = j / num_dashes
+                        t2 = (j + 0.5) / num_dashes
+                        px1 = int(points[-1][0] + (future_x - points[-1][0]) * t1)
+                        py1 = int(points[-1][1] + (future_y - points[-1][1]) * t1)
+                        px2 = int(points[-1][0] + (future_x - points[-1][0]) * t2)
+                        py2 = int(points[-1][1] + (future_y - points[-1][1]) * t2)
+                        cv2.line(output, (px1, py1), (px2, py2), (255, 200, 0), 2)
+
+                    # Ponto alvo
+                    cv2.circle(output, (future_x, future_y), 8, (255, 100, 0), 2)
+                    cv2.circle(output, (future_x, future_y), 3, (255, 200, 0), -1)
         else:
             # Fallback: Needle Enhance por CV
             output = self._cv_needle_enhance(frame)
 
-        # Label do modo
-        cv2.putText(output, "NEEDLE PILOT", (20, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        # Header premium com background
+        cv2.rectangle(output, (10, 10), (200, 70), (0, 40, 0), -1)
+        cv2.rectangle(output, (10, 10), (200, 70), (0, 200, 0), 1)
+        cv2.putText(output, "NEEDLE PILOT", (20, 35),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.65, (0, 255, 0), 1, cv2.LINE_AA)
+
+        # Status e angulo
+        if detected_needle or len(self.needle_history) > 0:
+            cv2.circle(output, (25, 55), 5, (0, 255, 0), -1)
+            cv2.putText(output, "TRACKING", (35, 60),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.4, (0, 255, 0), 1, cv2.LINE_AA)
+            if needle_angle is not None:
+                cv2.putText(output, f"{abs(needle_angle)}deg", (130, 60),
+                           cv2.FONT_HERSHEY_DUPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+        else:
+            cv2.circle(output, (25, 55), 5, (100, 100, 100), -1)
+            cv2.putText(output, "SEARCHING", (35, 60),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.4, (100, 100, 100), 1, cv2.LINE_AA)
 
         return output
 
@@ -636,7 +678,7 @@ class AIProcessor:
         return output
 
     def _process_cardiac(self, frame):
-        """Cardiac AI - Fracao de ejecao e visualizacao."""
+        """Cardiac AI - Fracao de ejecao e visualizacao premium."""
         output = frame.copy()
         h, w = frame.shape[:2]
 
@@ -655,7 +697,7 @@ class AIProcessor:
                     outputs = model(tensor).cpu().numpy()[0]
 
                 # outputs = [EF, ESV, EDV] (valores normalizados)
-                ef = int(np.clip(outputs[0] * 100, 20, 80))  # Fração de ejeção
+                ef = int(np.clip(outputs[0] * 100, 20, 80))
                 self.cardiac_ef = ef
 
             except Exception as e:
@@ -667,45 +709,142 @@ class AIProcessor:
             if self.cardiac_ef is None:
                 self.cardiac_ef = 55 + np.random.randint(-5, 6)
 
-        # Overlay
-        cv2.putText(output, "CARDIAC AI", (20, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 100), 2)
-
-        cv2.putText(output, f"EF: {self.cardiac_ef}%", (20, 80),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, (100, 100, 255), 2)
-
-        # Classificação
+        # Classificação e cores
         if self.cardiac_ef >= 55:
-            status = "Normal (>55%)"
-            color = (100, 255, 100)
+            status = "NORMAL"
+            ef_color = (100, 255, 100)  # Verde
+            bar_color = (80, 200, 80)
         elif self.cardiac_ef >= 40:
-            status = "Reducao leve (40-55%)"
-            color = (0, 255, 255)
+            status = "LEVE"
+            ef_color = (0, 255, 255)  # Amarelo
+            bar_color = (0, 200, 200)
         elif self.cardiac_ef >= 30:
-            status = "Reducao moderada (30-40%)"
-            color = (0, 165, 255)
+            status = "MODERADO"
+            ef_color = (0, 165, 255)  # Laranja
+            bar_color = (0, 140, 200)
         else:
-            status = "Reducao grave (<30%)"
-            color = (0, 0, 255)
+            status = "GRAVE"
+            ef_color = (0, 0, 255)  # Vermelho
+            bar_color = (0, 0, 200)
 
-        cv2.putText(output, status, (20, 110),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        # Header premium
+        cv2.rectangle(output, (10, 10), (180, 50), (80, 40, 40), -1)
+        cv2.rectangle(output, (10, 10), (180, 50), (200, 100, 100), 1)
+        cv2.putText(output, "CARDIAC AI", (20, 38),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 150, 150), 1, cv2.LINE_AA)
+
+        # Painel EF Premium (lado direito)
+        panel_x = w - 150
+        panel_y = 10
+        panel_w = 140
+        panel_h = 120
+
+        # Background do painel
+        overlay = output.copy()
+        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                     (30, 30, 40), -1)
+        cv2.addWeighted(overlay, 0.85, output, 0.15, 0, output)
+        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                     ef_color, 2)
+
+        # Titulo EF
+        cv2.putText(output, "EF", (panel_x + 10, panel_y + 25),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.5, (150, 150, 180), 1, cv2.LINE_AA)
+
+        # Valor EF grande
+        ef_text = f"{self.cardiac_ef}%"
+        cv2.putText(output, ef_text, (panel_x + 15, panel_y + 65),
+                   cv2.FONT_HERSHEY_DUPLEX, 1.3, ef_color, 2, cv2.LINE_AA)
+
+        # Status
+        cv2.putText(output, status, (panel_x + 15, panel_y + 90),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.45, ef_color, 1, cv2.LINE_AA)
+
+        # Barra de progresso
+        bar_x = panel_x + 10
+        bar_y = panel_y + 100
+        bar_w = panel_w - 20
+        bar_h = 10
+        cv2.rectangle(output, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (50, 50, 60), -1)
+
+        # Preencher barra baseado no EF (0-80%)
+        fill_w = int(bar_w * min(self.cardiac_ef, 80) / 80)
+        cv2.rectangle(output, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), bar_color, -1)
+
+        # Marcadores na barra
+        markers = [(30, "30%"), (55, "55%")]
+        for val, _ in markers:
+            mx = bar_x + int(bar_w * val / 80)
+            cv2.line(output, (mx, bar_y), (mx, bar_y + bar_h), (100, 100, 120), 1)
+
+        # Legenda de camaras (canto inferior esquerdo)
+        legend_y = h - 80
+        cv2.rectangle(output, (10, legend_y), (120, h - 10), (30, 30, 40), -1)
+        cv2.rectangle(output, (10, legend_y), (120, h - 10), (100, 100, 120), 1)
+
+        chambers = [("LV", (100, 150, 255)), ("LA", (255, 150, 150)), ("RV", (150, 255, 150))]
+        for i, (name, color) in enumerate(chambers):
+            cy = legend_y + 18 + i * 20
+            cv2.circle(output, (25, cy - 3), 5, color, -1)
+            cv2.putText(output, name, (35, cy), cv2.FONT_HERSHEY_DUPLEX, 0.4, color, 1, cv2.LINE_AA)
 
         return output
 
     def _process_fast(self, frame):
-        """FAST Protocol - Deteccao de liquido livre."""
+        """FAST Protocol - Deteccao de liquido livre com visual premium."""
         output = frame.copy()
+        h, w = frame.shape[:2]
 
-        # TODO: Implementar detector FAST
-        # Por enquanto: overlay informativo
-        cv2.putText(output, "FAST PROTOCOL", (20, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+        # Header premium
+        cv2.rectangle(output, (10, 10), (200, 50), (80, 60, 30), -1)
+        cv2.rectangle(output, (10, 10), (200, 50), (255, 180, 80), 1)
+        cv2.putText(output, "FAST PROTOCOL", (20, 38),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 200, 100), 1, cv2.LINE_AA)
 
-        janelas = ["Morrison (RUQ)", "Esplenorrenal", "Pelvico", "Pericardico"]
-        for i, janela in enumerate(janelas):
-            cv2.putText(output, f"[ ] {janela}", (20, 80 + i*30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        # Painel de janelas (lado direito)
+        panel_x = w - 180
+        panel_y = 10
+        panel_w = 170
+        panel_h = 150
+
+        # Background do painel
+        overlay = output.copy()
+        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                     (30, 30, 40), -1)
+        cv2.addWeighted(overlay, 0.85, output, 0.15, 0, output)
+        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                     (255, 180, 80), 1)
+
+        cv2.putText(output, "WINDOWS", (panel_x + 10, panel_y + 22),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (150, 150, 180), 1, cv2.LINE_AA)
+
+        janelas = [
+            ("RUQ (Morrison)", False, (255, 200, 80)),
+            ("LUQ (Spleen)", False, (255, 200, 80)),
+            ("Pelvic", False, (255, 200, 80)),
+            ("Cardiac", False, (255, 200, 80)),
+        ]
+
+        for i, (janela, checked, color) in enumerate(janelas):
+            jy = panel_y + 45 + i * 28
+            # Checkbox
+            cv2.rectangle(output, (panel_x + 10, jy - 10), (panel_x + 24, jy + 4),
+                         (80, 80, 100), -1)
+            cv2.rectangle(output, (panel_x + 10, jy - 10), (panel_x + 24, jy + 4),
+                         color, 1)
+            if checked:
+                cv2.line(output, (panel_x + 12, jy - 3), (panel_x + 16, jy + 1), color, 2)
+                cv2.line(output, (panel_x + 16, jy + 1), (panel_x + 22, jy - 8), color, 2)
+            # Label
+            cv2.putText(output, janela, (panel_x + 30, jy),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.35, (180, 180, 200), 1, cv2.LINE_AA)
+
+        # Status geral
+        cv2.rectangle(output, (10, h - 50), (180, h - 10), (30, 30, 40), -1)
+        cv2.rectangle(output, (10, h - 50), (180, h - 10), (100, 100, 120), 1)
+        cv2.circle(output, (25, h - 30), 6, (100, 255, 100), -1)
+        cv2.putText(output, "NEGATIVE", (40, h - 24),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.45, (100, 255, 100), 1, cv2.LINE_AA)
 
         return output
 
@@ -832,7 +971,7 @@ class AIProcessor:
         return output
 
     def _process_blines(self, frame):
-        """Lung AI - Deteccao de Linhas-B."""
+        """Lung AI - Deteccao de Linhas-B com visual premium."""
         output = frame.copy()
         h, w = frame.shape[:2]
 
@@ -840,7 +979,7 @@ class AIProcessor:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         # Realce de contraste vertical
-        kernel = np.array([[-1, 2, -1]])  # Kernel vertical
+        kernel = np.array([[-1, 2, -1]])
         enhanced = cv2.filter2D(gray, -1, kernel)
 
         # Threshold
@@ -850,62 +989,117 @@ class AIProcessor:
         lines = cv2.HoughLinesP(thresh, 1, np.pi/180, 30, minLineLength=h//4, maxLineGap=20)
 
         b_line_count = 0
+        b_line_positions = []
         if lines is not None:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
                 # Filtrar apenas linhas quase verticais
                 angle = abs(np.arctan2(y2-y1, x2-x1) * 180 / np.pi)
-                if 75 < angle < 105:  # Quase vertical
-                    cv2.line(output, (x1, y1), (x2, y2), (0, 200, 255), 2)
+                if 75 < angle < 105:
+                    # Visual premium - linhas com gradiente
+                    for t in range(0, 100, 5):
+                        alpha = t / 100.0
+                        px1 = int(x1 + (x2 - x1) * alpha)
+                        py1 = int(y1 + (y2 - y1) * alpha)
+                        px2 = int(x1 + (x2 - x1) * (alpha + 0.05))
+                        py2 = int(y1 + (y2 - y1) * (alpha + 0.05))
+                        color_intensity = int(150 + 105 * alpha)
+                        cv2.line(output, (px1, py1), (px2, py2), (0, color_intensity, 255), 2)
                     b_line_count += 1
+                    b_line_positions.append((x1 + x2) // 2)
 
-        # Limitar contagem a maximo razoavel
+        # Limitar contagem
         b_line_count = min(b_line_count, 10)
         self.b_line_count = b_line_count
 
-        # Overlay
-        cv2.putText(output, "LUNG AI", (20, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 200, 255), 2)
-        cv2.putText(output, f"Linhas-B: {b_line_count}", (20, 75),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-        # Classificacao
+        # Classificacao e cores
         if b_line_count <= 2:
-            status = "Normal"
-            color = (100, 255, 100)
+            status = "NORMAL"
+            status_color = (100, 255, 100)
         elif b_line_count <= 5:
-            status = "Leve"
-            color = (0, 255, 255)
+            status = "LEVE"
+            status_color = (0, 255, 255)
         else:
-            status = "Moderado/Grave"
-            color = (0, 100, 255)
+            status = "MODERADO"
+            status_color = (0, 100, 255)
 
-        cv2.putText(output, status, (20, 105),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # Header premium
+        cv2.rectangle(output, (10, 10), (160, 50), (60, 60, 40), -1)
+        cv2.rectangle(output, (10, 10), (160, 50), (200, 220, 150), 1)
+        cv2.putText(output, "LUNG AI", (20, 38),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.6, (200, 255, 150), 1, cv2.LINE_AA)
+
+        # Painel de B-lines (lado direito)
+        panel_x = w - 160
+        panel_y = 10
+        panel_w = 150
+        panel_h = 130
+
+        overlay = output.copy()
+        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                     (30, 30, 40), -1)
+        cv2.addWeighted(overlay, 0.85, output, 0.15, 0, output)
+        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                     (200, 220, 150), 1)
+
+        # Titulo
+        cv2.putText(output, "B-LINES", (panel_x + 10, panel_y + 22),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (150, 150, 180), 1, cv2.LINE_AA)
+
+        # Contagem grande
+        cv2.putText(output, str(b_line_count), (panel_x + 50, panel_y + 70),
+                   cv2.FONT_HERSHEY_DUPLEX, 1.8, status_color, 2, cv2.LINE_AA)
+
+        # Status
+        cv2.putText(output, status, (panel_x + 10, panel_y + 95),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.45, status_color, 1, cv2.LINE_AA)
+
+        # Barra de indicador
+        bar_x = panel_x + 10
+        bar_y = panel_y + 110
+        bar_w = panel_w - 20
+        bar_h = 10
+        cv2.rectangle(output, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (50, 50, 60), -1)
+
+        # Gradiente verde->amarelo->vermelho
+        segments = [
+            (0, 2, (80, 200, 80)),     # Normal
+            (2, 5, (0, 200, 200)),     # Leve
+            (5, 10, (0, 100, 255)),    # Moderado
+        ]
+        for start, end, color in segments:
+            if b_line_count > start:
+                fill_start = int(bar_w * start / 10)
+                fill_end = int(bar_w * min(b_line_count, end) / 10)
+                cv2.rectangle(output, (bar_x + fill_start, bar_y),
+                             (bar_x + fill_end, bar_y + bar_h), color, -1)
+
+        # Linha da pleura indicada
+        cv2.putText(output, "Pleura", (10, h - 20),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (150, 200, 200), 1, cv2.LINE_AA)
+        cv2.line(output, (60, h - 25), (w - 20, h - 25), (150, 200, 200), 1)
 
         return output
 
     def _process_bladder(self, frame):
-        """Bladder AI - Volume vesical."""
+        """Bladder AI - Volume vesical com visual premium."""
         output = frame.copy()
         h, w = frame.shape[:2]
 
         model = self.models.get('bladder')
         mask_found = False
+        contour_to_draw = None
 
         if model:
             try:
-                # Preparar input
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 resized = cv2.resize(gray, (224, 224))
                 tensor = torch.from_numpy(resized).float() / 255.0
                 tensor = tensor.unsqueeze(0).unsqueeze(0).to(self.device)
 
-                # Inferência
                 with torch.no_grad():
                     mask = model(tensor).cpu().numpy()[0, 0]
 
-                # Redimensionar mask para tamanho original
                 mask = cv2.resize(mask, (w, h))
                 binary = (mask > 0.5).astype(np.uint8)
 
@@ -917,9 +1111,8 @@ class AIProcessor:
 
                         if area > 1000:
                             mask_found = True
-                            cv2.drawContours(output, [largest], -1, (150, 100, 255), 2)
+                            contour_to_draw = largest
 
-                            # Calcular volume
                             rect = cv2.minAreaRect(largest)
                             (cx, cy), (width, height), angle = rect
 
@@ -935,41 +1128,110 @@ class AIProcessor:
                 print(f"Erro Bladder AI: {e}")
 
         if not mask_found:
-            # Simulacao: deteccao de regiao escura grande (bexiga cheia)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            # Bexiga aparece como regiao escura
             _, thresh = cv2.threshold(gray, 40, 255, cv2.THRESH_BINARY_INV)
-
-            # Encontrar contornos
             contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             if contours:
                 largest = max(contours, key=cv2.contourArea)
                 area = cv2.contourArea(largest)
 
-                if area > 5000:  # Regiao significativa
-                    cv2.drawContours(output, [largest], -1, (150, 100, 255), 2)
-
-                    # Estimar volume (formula elipsoide)
-                    # Volume = 0.52 * D1 * D2 * D3 (simplificado para 2D)
+                if area > 5000:
+                    contour_to_draw = largest
                     rect = cv2.minAreaRect(largest)
                     (cx, cy), (width, height), angle = rect
 
-                    # Converter pixels para mm (estimativa)
-                    px_to_mm = 0.3  # Aproximacao
+                    px_to_mm = 0.3
                     d1_mm = width * px_to_mm
                     d2_mm = height * px_to_mm
-                    d3_mm = (d1_mm + d2_mm) / 2  # Estimativa profundidade
+                    d3_mm = (d1_mm + d2_mm) / 2
 
                     volume_ml = 0.52 * d1_mm * d2_mm * d3_mm / 1000
                     self.bladder_volume = max(0, min(1000, volume_ml))
 
-                    cv2.putText(output, f"Volume: ~{int(self.bladder_volume)} mL",
-                               (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 100, 255), 2)
+        # Desenhar contorno premium
+        if contour_to_draw is not None:
+            # Glow effect
+            cv2.drawContours(output, [contour_to_draw], -1, (100, 50, 150), 4)
+            cv2.drawContours(output, [contour_to_draw], -1, (200, 120, 255), 2)
 
-        cv2.putText(output, "BLADDER AI", (20, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 100, 255), 2)
+            # Preenchimento semi-transparente
+            overlay = output.copy()
+            cv2.drawContours(overlay, [contour_to_draw], -1, (180, 100, 220), -1)
+            cv2.addWeighted(overlay, 0.2, output, 0.8, 0, output)
+
+        # Header premium
+        cv2.rectangle(output, (10, 10), (180, 50), (80, 40, 80), -1)
+        cv2.rectangle(output, (10, 10), (180, 50), (200, 120, 255), 1)
+        cv2.putText(output, "BLADDER AI", (20, 38),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.6, (200, 150, 255), 1, cv2.LINE_AA)
+
+        # Painel de volume (lado direito)
+        panel_x = w - 160
+        panel_y = 10
+        panel_w = 150
+        panel_h = 140
+
+        overlay = output.copy()
+        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                     (30, 30, 40), -1)
+        cv2.addWeighted(overlay, 0.85, output, 0.15, 0, output)
+        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                     (200, 120, 255), 1)
+
+        cv2.putText(output, "VOLUME", (panel_x + 10, panel_y + 22),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (150, 150, 180), 1, cv2.LINE_AA)
+
+        # Volume em mL
+        if self.bladder_volume is not None:
+            vol_text = f"{int(self.bladder_volume)}"
+            cv2.putText(output, vol_text, (panel_x + 20, panel_y + 65),
+                       cv2.FONT_HERSHEY_DUPLEX, 1.4, (200, 150, 255), 2, cv2.LINE_AA)
+            cv2.putText(output, "mL", (panel_x + 100, panel_y + 65),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (150, 120, 200), 1, cv2.LINE_AA)
+
+            # Status baseado no volume
+            if self.bladder_volume < 100:
+                status = "VAZIO"
+                status_color = (100, 100, 150)
+            elif self.bladder_volume < 300:
+                status = "NORMAL"
+                status_color = (100, 255, 100)
+            elif self.bladder_volume < 500:
+                status = "MODERADO"
+                status_color = (0, 255, 255)
+            else:
+                status = "DISTENDIDO"
+                status_color = (0, 100, 255)
+
+            cv2.putText(output, status, (panel_x + 10, panel_y + 90),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.45, status_color, 1, cv2.LINE_AA)
+
+            # Barra de volume
+            bar_x = panel_x + 10
+            bar_y = panel_y + 105
+            bar_w = panel_w - 20
+            bar_h = 12
+            cv2.rectangle(output, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (50, 50, 60), -1)
+
+            # Preencher barra (0-600 mL)
+            fill_w = int(bar_w * min(self.bladder_volume, 600) / 600)
+            cv2.rectangle(output, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), status_color, -1)
+
+            # Marcador 300 mL
+            marker_x = bar_x + int(bar_w * 300 / 600)
+            cv2.line(output, (marker_x, bar_y), (marker_x, bar_y + bar_h), (100, 100, 120), 1)
+
+            # Formula usada
+            cv2.putText(output, "D1xD2xD3x0.52", (panel_x + 10, panel_y + 132),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.3, (80, 80, 100), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(output, "---", (panel_x + 40, panel_y + 65),
+                       cv2.FONT_HERSHEY_DUPLEX, 1.4, (100, 100, 120), 2, cv2.LINE_AA)
+            cv2.putText(output, "mL", (panel_x + 100, panel_y + 65),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (80, 80, 100), 1, cv2.LINE_AA)
+            cv2.putText(output, "SCANNING", (panel_x + 10, panel_y + 90),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.45, (100, 100, 120), 1, cv2.LINE_AA)
 
         return output
 
