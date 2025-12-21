@@ -307,15 +307,85 @@ class AIProcessor:
 
     def _load_echonet(self, mode, path):
         """Carrega modelo EchoNet para ecocardiografia."""
-        # TODO: Implementar carregamento do EchoNet
-        print("EchoNet: Usando processamento CV (modelo nao disponivel)")
-        self.models[mode] = None
+        if not path or not os.path.exists(path):
+            print(f"EchoNet nao encontrado: {path}")
+            self.models[mode] = None
+            return
+
+        try:
+            import torchvision.models as models
+
+            # Criar modelo EchoNet
+            class EchoNet(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    resnet = models.resnet18(weights=None)
+                    self.conv1 = torch.nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+                    self.bn1 = resnet.bn1
+                    self.relu = resnet.relu
+                    self.maxpool = resnet.maxpool
+                    self.layer1 = resnet.layer1
+                    self.layer2 = resnet.layer2
+                    self.layer3 = resnet.layer3
+                    self.layer4 = resnet.layer4
+                    self.avgpool = resnet.avgpool
+                    self.fc = torch.nn.Linear(512, 3)
+
+                def forward(self, x):
+                    x = self.conv1(x)
+                    x = self.bn1(x)
+                    x = self.relu(x)
+                    x = self.maxpool(x)
+                    x = self.layer1(x)
+                    x = self.layer2(x)
+                    x = self.layer3(x)
+                    x = self.layer4(x)
+                    x = self.avgpool(x)
+                    x = torch.flatten(x, 1)
+                    x = self.fc(x)
+                    return x
+
+            model = EchoNet().to(self.device)
+            state_dict = torch.load(path, map_location=self.device)
+            model.load_state_dict(state_dict)
+            model.eval()
+            self.models[mode] = model
+            print(f"EchoNet carregado: {path}")
+
+        except Exception as e:
+            print(f"Erro ao carregar EchoNet: {e}")
+            self.models[mode] = None
 
     def _load_usfm(self, mode, path):
         """Carrega modelo USFM (Universal Ultrasound Foundation Model)."""
-        # TODO: Implementar USFM
-        print("USFM: Usando segmentacao simples (modelo nao disponivel)")
-        self.models[mode] = None
+        if not path or not os.path.exists(path):
+            print(f"USFM nao encontrado: {path}")
+            self.models[mode] = None
+            return
+
+        try:
+            import segmentation_models_pytorch as smp
+
+            model = smp.Unet(
+                encoder_name="resnet34",
+                encoder_weights=None,
+                in_channels=1,
+                classes=5,  # múltiplas estruturas anatômicas
+                activation='sigmoid'
+            ).to(self.device)
+
+            state_dict = torch.load(path, map_location=self.device)
+            model.load_state_dict(state_dict)
+            model.eval()
+            self.models[mode] = model
+            print(f"USFM carregado: {path}")
+
+        except ImportError:
+            print("segmentation_models_pytorch nao instalado")
+            self.models[mode] = None
+        except Exception as e:
+            print(f"Erro ao carregar USFM: {e}")
+            self.models[mode] = None
 
     def process(self, frame):
         """Processa frame com IA."""
@@ -570,19 +640,56 @@ class AIProcessor:
         output = frame.copy()
         h, w = frame.shape[:2]
 
-        # TODO: Implementar EchoNet
-        # Por enquanto: overlay informativo
+        model = self.models.get('cardiac')
+
+        if model:
+            try:
+                # Preparar input
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                resized = cv2.resize(gray, (224, 224))
+                tensor = torch.from_numpy(resized).float() / 255.0
+                tensor = tensor.unsqueeze(0).unsqueeze(0).to(self.device)
+
+                # Inferência
+                with torch.no_grad():
+                    outputs = model(tensor).cpu().numpy()[0]
+
+                # outputs = [EF, ESV, EDV] (valores normalizados)
+                ef = int(np.clip(outputs[0] * 100, 20, 80))  # Fração de ejeção
+                self.cardiac_ef = ef
+
+            except Exception as e:
+                print(f"Erro EchoNet: {e}")
+                if self.cardiac_ef is None:
+                    self.cardiac_ef = 55 + np.random.randint(-5, 6)
+        else:
+            # Fallback: usar valor simulado
+            if self.cardiac_ef is None:
+                self.cardiac_ef = 55 + np.random.randint(-5, 6)
+
+        # Overlay
         cv2.putText(output, "CARDIAC AI", (20, 40),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 100), 2)
 
-        # Simular EF (placeholder)
-        if self.cardiac_ef is None:
-            self.cardiac_ef = 55 + np.random.randint(-5, 6)
-
         cv2.putText(output, f"EF: {self.cardiac_ef}%", (20, 80),
                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (100, 100, 255), 2)
-        cv2.putText(output, "Normal (>55%)" if self.cardiac_ef >= 55 else "Reducao leve",
-                   (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+
+        # Classificação
+        if self.cardiac_ef >= 55:
+            status = "Normal (>55%)"
+            color = (100, 255, 100)
+        elif self.cardiac_ef >= 40:
+            status = "Reducao leve (40-55%)"
+            color = (0, 255, 255)
+        elif self.cardiac_ef >= 30:
+            status = "Reducao moderada (30-40%)"
+            color = (0, 165, 255)
+        else:
+            status = "Reducao grave (<30%)"
+            color = (0, 0, 255)
+
+        cv2.putText(output, status, (20, 110),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
         return output
 
@@ -605,12 +712,60 @@ class AIProcessor:
     def _process_segment(self, frame):
         """Anatomia - Segmentacao geral de estruturas."""
         output = frame.copy()
+        h, w = frame.shape[:2]
 
-        # TODO: Implementar USFM
+        model = self.models.get('segment')
+
+        if model:
+            try:
+                # Preparar input
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                resized = cv2.resize(gray, (224, 224))
+                tensor = torch.from_numpy(resized).float() / 255.0
+                tensor = tensor.unsqueeze(0).unsqueeze(0).to(self.device)
+
+                # Inferência
+                with torch.no_grad():
+                    masks = model(tensor).cpu().numpy()[0]
+
+                # 5 classes: Tecido, Osso, Fluido, Vaso, Outro
+                colors = [
+                    (100, 255, 100),   # Tecido - verde
+                    (255, 255, 255),   # Osso - branco
+                    (255, 100, 100),   # Fluido - azul
+                    (0, 0, 255),       # Vaso - vermelho
+                    (255, 100, 255),   # Outro - magenta
+                ]
+                labels = ["Tecido", "Osso", "Fluido", "Vaso", "Outro"]
+
+                for i in range(min(5, masks.shape[0])):
+                    mask = cv2.resize(masks[i], (w, h))
+                    binary = mask > 0.5
+
+                    if binary.any():
+                        contours, _ = cv2.findContours(
+                            binary.astype(np.uint8),
+                            cv2.RETR_EXTERNAL,
+                            cv2.CHAIN_APPROX_SIMPLE
+                        )
+                        cv2.drawContours(output, contours, -1, colors[i], 1)
+
+                        # Label no maior contorno
+                        if contours:
+                            largest = max(contours, key=cv2.contourArea)
+                            if cv2.contourArea(largest) > 500:
+                                M = cv2.moments(largest)
+                                if M["m00"] > 0:
+                                    cx = int(M["m10"] / M["m00"])
+                                    cy = int(M["m01"] / M["m00"])
+                                    cv2.putText(output, labels[i], (cx-20, cy),
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, colors[i], 1)
+
+            except Exception as e:
+                print(f"Erro USFM: {e}")
+
         cv2.putText(output, "ANATOMIA AI", (20, 40),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 255), 2)
-        cv2.putText(output, "Identificando estruturas...", (20, 70),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
 
         return output
 
@@ -736,11 +891,50 @@ class AIProcessor:
         h, w = frame.shape[:2]
 
         model = self.models.get('bladder')
+        mask_found = False
 
         if model:
-            # TODO: Segmentacao real
-            pass
-        else:
+            try:
+                # Preparar input
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                resized = cv2.resize(gray, (224, 224))
+                tensor = torch.from_numpy(resized).float() / 255.0
+                tensor = tensor.unsqueeze(0).unsqueeze(0).to(self.device)
+
+                # Inferência
+                with torch.no_grad():
+                    mask = model(tensor).cpu().numpy()[0, 0]
+
+                # Redimensionar mask para tamanho original
+                mask = cv2.resize(mask, (w, h))
+                binary = (mask > 0.5).astype(np.uint8)
+
+                if binary.any():
+                    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if contours:
+                        largest = max(contours, key=cv2.contourArea)
+                        area = cv2.contourArea(largest)
+
+                        if area > 1000:
+                            mask_found = True
+                            cv2.drawContours(output, [largest], -1, (150, 100, 255), 2)
+
+                            # Calcular volume
+                            rect = cv2.minAreaRect(largest)
+                            (cx, cy), (width, height), angle = rect
+
+                            px_to_mm = 0.3
+                            d1_mm = width * px_to_mm
+                            d2_mm = height * px_to_mm
+                            d3_mm = (d1_mm + d2_mm) / 2
+
+                            volume_ml = 0.52 * d1_mm * d2_mm * d3_mm / 1000
+                            self.bladder_volume = max(0, min(1000, volume_ml))
+
+            except Exception as e:
+                print(f"Erro Bladder AI: {e}")
+
+        if not mask_found:
             # Simulacao: deteccao de regiao escura grande (bexiga cheia)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 

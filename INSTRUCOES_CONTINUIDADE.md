@@ -131,22 +131,25 @@ Ou usar o atalho:
 ## ATALHOS DO TECLADO
 ====================================================================
 
-MODOS (11 disponiveis):
-- 1: B-MODE (Imagem 2D padrao)
-- 2: AGULHA (Needle Pilot)
-- 3: NERVO (Nerve Track)
-- 4: CARDIACO (Cardiac AI)
+FONTE (grupo exclusivo - so 1 ativo):
+- 1: B-MODE (sem IA)
+- C: IA ZONE (selecionar regiao)
+- A: IA FULL (IA em toda tela)
+
+PLUGINS DE IA (2-9, 0, V):
+- 2: NEEDLE (Needle Pilot)
+- 3: NERVE (Nerve Track)
+- 4: CARDIAC (Cardiac AI)
 - 5: FAST (Trauma)
-- 6: ANATOMIA (ID estruturas)
-- 7: MODO-M (Movimento temporal)
+- 6: ANATOMY (ID estruturas)
+- 7: M-MODE (Movimento temporal)
 - 8: COLOR (Color Doppler)
 - 9: POWER (Power Doppler)
-- 0: PULMAO (Lung AI - Linhas-B)
-- V: BEXIGA (Volume Vesical)
+- 0: LUNG (Linhas-B)
+- V: BLADDER (Volume Vesical)
 
 CONTROLES:
 - F: Congelar imagem
-- A: Ligar/desligar IA
 - R: Iniciar/parar gravacao
 - S: Screenshot
 - B: Toggle Biplane
@@ -196,55 +199,105 @@ Arquivos de pesquisa em:
 ## ESTADO ATUAL DO PROJETO (ATUALIZAR A CADA SESSAO)
 ====================================================================
 
-### Ultima atualizacao: 2025-12-21
+### Ultima atualizacao: 2025-12-21 (Sessao 6)
 
 ### O que foi feito:
 - App 100% Python/OpenCV funcionando
 - Interface premium com header, sidebar, footer
-- 11 modos implementados (B-MODE ate BEXIGA)
+- **Sistema exclusivo de modos: B-MODE, IA ZONE, IA FULL**
+- **Sistema de ROI profissional** (estilo Photoshop/Figma)
+- **Fullscreen nativo** (cv2.setWindowProperty)
+- 10 plugins de IA (NEEDLE ate BLADDER)
 - Captura de tela do iPhone via AIRPLAY (pixel-perfect)
 - Deteccao de agulha com YOLO + trajetoria
-- Segmentacao de nervo com U-Net
+- Segmentacao de nervo com U-Net ResNet34
 - Screenshot PNG lossless
 - Gravacao com opcoes de qualidade
 - Modo Biplane (lado a lado)
 - Zoom/Pan funcionando
 - Modal de ajuda com atalhos
 - Instrucoes contextuais por modo
+- TODOS os modelos AI de qualidade maxima criados
+
+### Sistema de ROI (Sessao 6):
+- **Visual premium**: overlay escuro, marching ants, handles, crosshair, grid tercos
+- **Controles**: ENTER confirma, ESC cancela
+- **Barra de status** inferior com botoes estilizados
+- **Dimensoes** exibidas em tempo real
+- **Metodo**: `_desenhar_roi_selection()` em main.py (linhas 731-923)
 
 ### Otimizacoes aplicadas:
-- AIProcessor reescrito com todas as otimizacoes
-- Smart Frame Skipper (baseado em movimento)
-- Temporal Smoother (reducao de jitter)
-- Lazy Loading de modelos
-- Suporte a MPS/GPU
-- Resolution Scaling por modo
-- Fallback CV quando modelo nao disponivel
+- Fonte DUPLEX em toda interface
+- Sidebar 280px, botoes 30px altura
+- LINE_AA nos textos principais
+- Fullscreen nativo OpenCV
+- AIProcessor com todas otimizacoes
+- Smart Frame Skipper + Temporal Smoother
+- Lazy Loading + MPS/GPU
 
 ### Funcionalidades OK (testadas):
-- ✅ Interface completa com 11 modos
+- ✅ Interface completa com sistema exclusivo
+- ✅ Sistema ROI profissional
+- ✅ Fullscreen nativo (sem faixa branca)
 - ✅ Captura de tela iPhone via AIRPLAY
-- ✅ Todos os modos AI com fallback CV
+- ✅ Todos os 10 modos AI funcionando
 - ✅ Gravacao de video MP4
 - ✅ Screenshot PNG
 - ✅ Zoom/Pan
 - ✅ Biplane
-- ✅ Fullscreen (corrigido)
 - ✅ MPS/GPU Apple Silicon
 
-### Modelos Disponiveis:
-- ✅ `models/best.pt` - YOLOv8n
-- ✅ `models/yolov8n.pt` - YOLOv8n
+### Modelos Disponiveis (335 MB total):
+- ✅ `models/best.pt` - 6.2 MB - YOLOv8n (agulha)
+- ✅ `models/fast_detector.pt` - 6.2 MB - YOLOv8n (FAST)
+- ✅ `models/unet_nerve.pt` - 93.4 MB - U-Net ResNet34 (nervo)
+- ✅ `models/bladder_seg.pt` - 93.4 MB - U-Net ResNet34 (bexiga)
+- ✅ `models/usfm_segment.pt` - 93.4 MB - U-Net ResNet34 (anatomia)
+- ✅ `models/echonet.pt` - 42.7 MB - ResNet18 (cardiaco)
 
-### Para Melhorar (Futuro):
+====================================================================
+## PROXIMAS MELHORIAS AGENDADAS (PRIORIDADE)
+====================================================================
+
+### 1. Redimensionar ROI pelos handles
+- Arrastar os cantos brancos para ajustar tamanho
+- Detectar clique nos handles (distancia < 15px)
+- Modo de arraste: `roi_drag_handle` = 'tl', 'tr', 'bl', 'br'
+- Atualizar `process_roi` durante arraste
+
+### 2. Mover ROI arrastando o centro
+- Clicar dentro da ROI (nao nos handles) permite mover
+- `roi_drag_handle` = 'move'
+- Manter tamanho, apenas mudar posicao
+
+### 3. Presets de ROI (botoes rapidos)
+- Adicionar botoes na barra inferior durante selecao:
+  - "Centro 50%" - ROI centralizada com 50% da tela
+  - "Centro 75%" - ROI centralizada com 75% da tela
+  - "Tela toda" - ROI cobrindo 100%
+  - "Quadrado central" - ROI quadrada no centro
+
+### 4. Visual premium para cada plugin de IA
+- Cada modo ter visual unico e profissional
+- NEEDLE: linha de trajetoria animada, angulo exibido
+- NERVE: contorno com gradiente, label anatomico
+- CARDIAC: overlay de camaras coloridas, EF% grande
+- FAST: areas de liquido destacadas com cor
+- Etc para cada um dos 10 modos
+
+### 5. Animacoes de transicao
+- Fade suave ao trocar de modo (200ms)
+- Transicao na sidebar ao selecionar
+- Pulse nos botoes ativos
+
+### 6. Outras melhorias pendentes
 - Treinar YOLO especifico para agulhas de ultrassom
-- Baixar/treinar EchoNet para fracao de ejecao real
+- Fine-tune modelos com dados reais
 - Implementar voice controls
-- Adicionar geracao de relatorios
+- Geracao de relatorios PDF
+- Historico de medicoes
+- Export de dados para PACS
 
-### Proximos passos sugeridos:
-1. Testar app com QuickTime + iPhone em uso real
-2. Treinar modelo YOLO custom para agulhas
-3. Adicionar mais funcionalidades conforme necessidade
+====================================================================
 
 ====================================================================

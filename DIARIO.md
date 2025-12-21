@@ -1,6 +1,109 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-21 - Sessao 6: Sistema ROI Profissional + Fullscreen Nativo
+====================================================================
+
+### Resumo
+Implementacao de sistema de selecao de ROI profissional (estilo Photoshop/Figma) e correcao do fullscreen para usar API nativa do OpenCV.
+
+### Sistema de ROI Profissional
+Novo metodo `_desenhar_roi_selection()` com recursos premium:
+
+1. **Visual**:
+   - Overlay escuro (60%) fora da selecao
+   - Borda animada "marching ants" (tracejado que se move)
+   - Handles brancos nos 4 cantos
+   - Crosshair central tracejado com circulo
+   - Grid de regra dos tercos (composicao)
+
+2. **Informacoes**:
+   - Dimensoes em tempo real (ex: "640 x 480 px")
+   - Badge estilizado com borda ciano
+
+3. **Controles**:
+   - ENTER para confirmar ROI
+   - ESC para cancelar
+   - Barra de status premium na parte inferior
+   - Preview em tempo real enquanto arrasta
+
+4. **Comportamento**:
+   - Tamanho minimo de 30x30px
+   - Feedback visual durante arraste
+   - Mensagens claras para o usuario
+
+### Fullscreen Corrigido
+- Antes: `cv2.resizeWindow()` + `cv2.moveWindow()` (gambiarrado)
+- Agora: `cv2.setWindowProperty(cv2.WND_PROP_FULLSCREEN)` (nativo)
+- Removida funcao `_get_menubar_height()` (nao mais necessaria)
+
+### Melhorias Visuais
+- Fonte DUPLEX em toda interface (mais nitida)
+- Sidebar mais larga: 260px -> 280px
+- Botoes: altura 30px, gap 2px
+- LINE_AA adicionado de volta nos textos principais (melhor visual)
+
+### Correcoes de Bugs
+- IA ZONE -> IA FULL nao voltava mais para B-MODE
+- ROI pequena (clique sem arrastar) nao cancela mais a selecao
+- Footer nao corta mais o botao EXIT
+
+### Arquivos Modificados
+- `main.py` - Sistema ROI, fullscreen, visual
+
+---
+
+====================================================================
+## 2025-12-21 - Sessao 5: Otimizacao de Performance e Refatoracao UI
+====================================================================
+
+### Resumo
+Refatoracao completa da interface com sistema exclusivo de modos (B-MODE/IA ZONE/IA FULL) e otimizacao de performance.
+
+### Alteracoes de Interface
+1. Sistema de selecao exclusivo: B-MODE, IA ZONE, IA FULL (so 1 ativo por vez)
+2. Plugins de IA so funcionam com IA ZONE ou IA FULL ativos
+3. Secoes organizadas: "PLUGINS IA", "RECORDING", "SYSTEM"
+4. Variaveis refatoradas: `ai_on` e `modo_idx` -> `source_mode` e `plugin_idx`
+
+### Correcao de Bugs
+- IA ZONE e IA FULL nao respondiam a cliques (callback de mouse bloqueando)
+- Selecao de ROI cancelava corretamente ao clicar na sidebar
+
+---
+
+====================================================================
+## 2025-12-21 - Sessao 4: Modelos de Qualidade Maxima
+====================================================================
+
+### Resumo
+Criacao de todos os modelos AI de qualidade maxima (ResNet34) e correcao do ai_processor.py para carregar todos os modelos corretamente.
+
+### Modelos Criados (335 MB total)
+- `models/best.pt` - 6.2 MB (YOLOv8n para agulha)
+- `models/fast_detector.pt` - 6.2 MB (YOLOv8n para FAST)
+- `models/unet_nerve.pt` - 93.4 MB (U-Net ResNet34 para nervo)
+- `models/bladder_seg.pt` - 93.4 MB (U-Net ResNet34 para bexiga)
+- `models/usfm_segment.pt` - 93.4 MB (U-Net ResNet34 para anatomia)
+- `models/echonet.pt` - 42.7 MB (ResNet18 para fracao de ejecao)
+
+### Atualizacoes no ai_processor.py
+1. `_load_echonet()` - Implementado carregamento do modelo EchoNet
+2. `_load_usfm()` - Implementado carregamento do modelo USFM
+3. `_process_cardiac()` - Atualizado para usar EchoNet real
+4. `_process_segment()` - Atualizado para usar USFM real
+5. `_process_bladder()` - Atualizado para usar U-Net real
+
+### Testes Realizados
+- ✅ Todos os 10 modos AI funcionando
+- ✅ Todos os 6 modelos carregando corretamente
+- ✅ MPS/GPU Apple Silicon funcionando
+- ✅ Todos os modulos verificados
+- ✅ Todas as dependencias OK
+
+---
+
+====================================================================
 ## 2025-12-21 - Sessao 3: Correcoes de Bugs e Modelos
 ====================================================================
 

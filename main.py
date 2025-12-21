@@ -14,6 +14,13 @@ import threading
 import os
 import sys
 
+# Inicializar NSApplication para controle de fullscreen no macOS
+try:
+    from AppKit import NSApplication
+    NSApplication.sharedApplication()
+except:
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 from src.window_capture import WindowCapture
@@ -52,9 +59,23 @@ class CapturaThread(threading.Thread):
 
 
 # =============================================================================
-# CLASSE BOTAO
+# CLASSE BOTAO - Otimizada para Performance
 # =============================================================================
 class Botao:
+    # Cores pré-calculadas (evita criar tuplas a cada frame)
+    COR_BG_NORMAL = (22, 22, 30)
+    COR_BG_HOVER = (40, 40, 52)
+    COR_BORDA = (35, 35, 45)
+    COR_BORDA_HOVER = (60, 60, 75)
+    COR_TEXTO_NORMAL = (140, 140, 155)
+    COR_TEXTO_ATIVO = (255, 255, 255)
+    COR_TEXTO_HOVER = (230, 230, 240)
+    COR_BADGE = (50, 50, 65)
+    COR_BADGE_ATIVO = (180, 180, 200)
+    COR_TECLA = (90, 90, 110)
+    COR_TECLA_ATIVO = (200, 200, 220)
+    COR_ACCENT = (255, 255, 255)
+
     def __init__(self, x, y, w, h, texto, tecla, cor_normal, cor_ativo, tooltip=""):
         self.x = x
         self.y = y
@@ -62,34 +83,47 @@ class Botao:
         self.h = h
         self.texto = texto
         self.tecla = tecla
-        self.cor_normal = cor_normal
         self.cor_ativo = cor_ativo
-        self.tooltip = tooltip
         self.ativo = False
         self.hover = False
+        # Pré-calcular posições
+        self.x2 = x + w
+        self.y2 = y + h
+        self.cy = y + h // 2
+        self.badge_x = x + 14
+        self.text_x = x + 40
 
     def contem(self, px, py):
-        return self.x <= px <= self.x + self.w and self.y <= py <= self.y + self.h
+        return self.x <= px <= self.x2 and self.y <= py <= self.y2
 
     def desenhar(self, img):
         if self.ativo:
-            cor_bg = self.cor_ativo
-            cor_texto = (0, 0, 0)
+            cv2.rectangle(img, (self.x, self.y), (self.x2, self.y2), self.cor_ativo, -1)
+            cv2.rectangle(img, (self.x, self.y + 2), (self.x + 3, self.y2 - 2), self.COR_ACCENT, -1)
+            cor_texto = self.COR_TEXTO_ATIVO
+            badge_cor = self.COR_BADGE_ATIVO
+            tecla_cor = self.COR_TECLA_ATIVO
         elif self.hover:
-            cor_bg = tuple(min(c + 25, 255) for c in self.cor_normal)
-            cor_texto = (220, 220, 220)
+            cv2.rectangle(img, (self.x, self.y), (self.x2, self.y2), self.COR_BG_HOVER, -1)
+            cv2.rectangle(img, (self.x, self.y), (self.x2, self.y2), self.COR_BORDA_HOVER, 1)
+            cv2.rectangle(img, (self.x, self.y + 4), (self.x + 2, self.y2 - 4), self.cor_ativo, -1)
+            cor_texto = self.COR_TEXTO_HOVER
+            badge_cor = self.COR_BADGE
+            tecla_cor = self.COR_TECLA
         else:
-            cor_bg = self.cor_normal
-            cor_texto = (180, 180, 180)
+            cv2.rectangle(img, (self.x, self.y), (self.x2, self.y2), self.COR_BG_NORMAL, -1)
+            cv2.rectangle(img, (self.x, self.y), (self.x2, self.y2), self.COR_BORDA, 1)
+            cor_texto = self.COR_TEXTO_NORMAL
+            badge_cor = self.COR_BADGE
+            tecla_cor = self.COR_TECLA
 
-        cv2.rectangle(img, (self.x, self.y), (self.x + self.w, self.y + self.h), cor_bg, -1)
-        cv2.rectangle(img, (self.x, self.y), (self.x + self.w, self.y + self.h), (50, 50, 60), 1)
-
-        label = f"[{self.tecla}] {self.texto}" if self.tecla else self.texto
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-        tx = self.x + (self.w - tw) // 2
-        ty = self.y + (self.h + th) // 2
-        cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.38, cor_texto, 1, cv2.LINE_AA)
+        if self.tecla:
+            cv2.rectangle(img, (self.badge_x - 4, self.cy - 8), (self.badge_x + 12, self.cy + 8), badge_cor, -1)
+            cv2.putText(img, self.tecla, (self.badge_x, self.cy + 4), cv2.FONT_HERSHEY_DUPLEX, 0.38, tecla_cor, 1, cv2.LINE_AA)
+            cv2.putText(img, self.texto, (self.text_x + 2, self.cy + 4), cv2.FONT_HERSHEY_DUPLEX, 0.44, cor_texto, 1, cv2.LINE_AA)
+        else:
+            cv2.putText(img, self.texto, (self.x + self.w // 2 - len(self.texto) * 5, self.cy + 4),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.5, cor_texto, 1, cv2.LINE_AA)
 
 
 # =============================================================================
@@ -119,34 +153,39 @@ class USGApp:
     Baseada no projeto HTML PlataformaUSG.
     """
 
-    # Todos os modos disponiveis (igual ao HTML)
+    # Modos AI - Cores estilo Butterfly/Clarius (vibrantes e premium)
     MODOS = [
-        ('B-MODE', '1', (180, 180, 180), "Modo Brilho - Imagem 2D padrao"),
-        ('AGULHA', '2', (100, 255, 100), "Needle Pilot - Realce de agulha"),
-        ('NERVO', '3', (0, 255, 255), "Nerve Track - Segmentacao nervos"),
-        ('CARDIACO', '4', (100, 100, 255), "Cardiac AI - Fracao Ejecao"),
-        ('FAST', '5', (0, 165, 255), "Protocolo FAST - Trauma"),
-        ('ANATOMIA', '6', (255, 100, 255), "Anatomia - ID estruturas"),
-        ('MODO-M', '7', (200, 200, 100), "Modo-M - Movimento temporal"),
-        ('COLOR', '8', (255, 50, 50), "Color Doppler - Fluxo"),
-        ('POWER', '9', (255, 150, 50), "Power Doppler - Alta sens."),
-        ('PULMAO', '0', (100, 200, 255), "Lung AI - Linhas-B"),
-        ('BEXIGA', 'V', (150, 100, 255), "Volume Vesical"),
+        ('B-MODE', '1', (140, 140, 150), "Modo Brilho - Imagem 2D padrao"),
+        ('NEEDLE', '2', (80, 220, 120), "Needle Pilot - Realce de agulha"),
+        ('NERVE', '3', (50, 220, 220), "Nerve Track - Segmentacao nervos"),
+        ('CARDIAC', '4', (90, 130, 230), "Cardiac AI - Fracao Ejecao"),
+        ('FAST', '5', (60, 180, 240), "Protocolo FAST - Trauma"),
+        ('ANATOMY', '6', (200, 120, 220), "Anatomia - ID estruturas"),
+        ('M-MODE', '7', (180, 180, 100), "Modo-M - Movimento temporal"),
+        ('COLOR', '8', (220, 80, 80), "Color Doppler - Fluxo"),
+        ('POWER', '9', (240, 160, 60), "Power Doppler - Alta sens."),
+        ('LUNG', '0', (100, 180, 240), "Lung AI - Linhas-B"),
+        ('BLADDER', 'V', (160, 100, 220), "Volume Vesical"),
     ]
 
-    SIDEBAR_W = 200
+    SIDEBAR_W = 280  # Sidebar premium (mais larga para melhor legibilidade)
 
     def __init__(self):
-        # Estado
-        self.modo_idx = 0
+        # Estado principal - GRUPO EXCLUSIVO
+        # 0 = B-MODE (sem IA), 1 = IA ZONE, 2 = IA FULL
+        self.source_mode = 0  # Começa em B-MODE
+
+        # Plugin de IA selecionado (0=NEEDLE, 1=NERVE, etc.)
+        self.plugin_idx = 0
+
+        # Estados gerais
         self.pause = False
-        self.ai_on = False
         self.recording = False
         self.show_sidebar = True
         self.show_overlays = True
         self.show_help = False
         self.show_instructions = True
-        self.fullscreen = False
+        self.fullscreen = True
         self.biplane_active = False
         self.biplane_ref = None
         self.running = True
@@ -158,6 +197,24 @@ class USGApp:
         self.zoom_level = 1.0
         self.pan_x = 0
         self.pan_y = 0
+
+        # ROI para IA ZONE (sistema profissional)
+        self.process_roi = None
+        self.selecting_roi = False
+        self.roi_start = None
+        self.roi_end = None
+        self.roi_confirmed = False  # ROI confirmada com ENTER
+        self.roi_drag_handle = None  # Para redimensionar: 'tl', 'tr', 'bl', 'br', 'move'
+        self.roi_animation_frame = 0  # Para marching ants
+
+        # Cache da sidebar para performance
+        self._sidebar_cache = None
+        self._sidebar_dirty = True  # Força redesenho quando True
+
+        # Info de escala para converter coordenadas
+        self.display_scale = 1.0
+        self.display_offset_x = 0
+        self.display_offset_y = 0
 
         # AI
         self.ai = None
@@ -173,8 +230,11 @@ class USGApp:
         # Janela
         self.janela = "USG FLOW"
         cv2.namedWindow(self.janela, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.janela, 1700, 950)
         cv2.setMouseCallback(self.janela, self._mouse_callback)
+
+        # Iniciar em fullscreen real
+        self.fullscreen = True
+        cv2.setWindowProperty(self.janela, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
         # Criar botoes
         self._criar_botoes()
@@ -207,148 +267,290 @@ class USGApp:
         print("=" * 60 + "\n")
 
     def _criar_botoes(self):
-        """Cria todos os botoes da sidebar."""
+        """Cria todos os botoes da sidebar - Layout Premium Moderno."""
         self.botoes_modo = []
         self.botoes_ctrl = []
         self.botoes_view = []
+        self.botoes_source = []  # Grupo exclusivo: B-MODE, IA ZONE, IA FULL
+        self.section_titles = []
 
-        bg_btn = (40, 40, 48)
+        # Cores premium
+        bg_btn = (28, 28, 35)
 
-        # Botoes de MODO
-        y = 55
-        for i, (nome, tecla, cor, tooltip) in enumerate(self.MODOS):
-            btn = Botao(10, y, 180, 26, nome, tecla, bg_btn, cor, tooltip)
+        # Dimensões padronizadas
+        BTN_W = 220
+        BTN_H = 30
+        BTN_GAP = 2
+        MARGIN = 30
+
+        y = 70
+
+        # ═══════════════════════════════════════
+        # SEÇÃO 1: GRUPO EXCLUSIVO (B-MODE / IA ZONE / IA FULL)
+        # ═══════════════════════════════════════
+        source_btns = [
+            ('B-MODE', '1', (140, 140, 160)),    # Cinza neutro
+            ('IA ZONE', 'C', (255, 200, 60)),    # Amarelo dourado
+            ('IA FULL', 'A', (100, 220, 140)),   # Verde suave
+        ]
+        for texto, tecla, cor in source_btns:
+            btn = Botao(MARGIN, y, BTN_W, BTN_H, texto, tecla, bg_btn, cor, "")
+            self.botoes_source.append(btn)
+            y += BTN_H + BTN_GAP
+
+        # ═══════════════════════════════════════
+        # SEÇÃO 2: PLUGINS DE IA (só funcionam com IA ZONE ou IA FULL)
+        # ═══════════════════════════════════════
+        y += 8
+        self.plugins_title_y = y  # Guardar posição do título
+        y += 18  # Espaço para o título
+
+        for i, (nome, tecla, cor, tooltip) in enumerate(self.MODOS[1:]):
+            btn = Botao(MARGIN, y, BTN_W, BTN_H, nome, tecla, bg_btn, cor, tooltip)
             self.botoes_modo.append(btn)
-            y += 30
+            y += BTN_H + BTN_GAP
 
-        # Separador - Controles
-        y += 15
+        # ═══════════════════════════════════════
+        # SEÇÃO 3: RECORDING
+        # ═══════════════════════════════════════
+        y += 8
+        self.recording_title_y = y
+        y += 18
 
-        # Botoes de CONTROLE
         controles = [
-            ('Freeze', 'F', (0, 200, 255), "Congelar imagem"),
-            ('AI', 'A', (100, 255, 100), "Ativar processamento IA"),
-            ('Gravar', 'R', (80, 80, 255), "Iniciar/parar gravacao"),
-            ('Foto', 'S', (255, 165, 0), "Salvar screenshot"),
-            ('Biplane', 'B', (200, 100, 200), "Modo lado a lado"),
+            ('FREEZE', 'F', (0, 200, 255)),
+            ('REC', 'R', (100, 100, 230)),
+            ('CAPTURE', 'S', (80, 180, 255)),
         ]
-        for texto, tecla, cor, tooltip in controles:
-            btn = Botao(10, y, 180, 26, texto, tecla, bg_btn, cor, tooltip)
+        for texto, tecla, cor in controles:
+            btn = Botao(MARGIN, y, BTN_W, BTN_H, texto, tecla, bg_btn, cor, "")
             self.botoes_ctrl.append(btn)
-            y += 30
+            y += BTN_H + BTN_GAP
 
-        # Separador - View
-        y += 15
+        # ═══════════════════════════════════════
+        # SEÇÃO 4: SYSTEM
+        # ═══════════════════════════════════════
+        y += 8
+        self.system_title_y = y
+        y += 18
 
-        # Botoes de VIEW
-        view_btns = [
-            ('Zoom +', '+', (100, 150, 200), "Aumentar zoom"),
-            ('Zoom -', '-', (100, 150, 200), "Diminuir zoom"),
-            ('Reset', '0', (150, 150, 150), "Resetar visualizacao"),
-            ('Overlays', 'H', (120, 120, 140), "Mostrar/esconder overlays"),
-            ('Sidebar', 'T', (120, 120, 140), "Mostrar/esconder sidebar"),
-            ('Ajuda', '?', (100, 150, 255), "Mostrar atalhos"),
+        # Zoom lado a lado
+        half_w = (BTN_W - 6) // 2
+        btn_zoom_plus = Botao(MARGIN, y, half_w, BTN_H, '+', None, bg_btn, (100, 200, 100), "")
+        btn_zoom_minus = Botao(MARGIN + half_w + 6, y, half_w, BTN_H, '-', None, bg_btn, (200, 100, 100), "")
+        self.botoes_view.append(btn_zoom_plus)
+        self.botoes_view.append(btn_zoom_minus)
+        y += BTN_H + BTN_GAP
+
+        sistema_btns = [
+            ('FULLSCREEN', 'X', (120, 120, 160)),
+            ('HELP', '?', (120, 120, 160)),
+            ('EXIT', 'Q', (160, 80, 80)),
         ]
-        for texto, tecla, cor, tooltip in view_btns:
-            btn = Botao(10, y, 88 if texto.startswith('Zoom') else 180, 24, texto, tecla, bg_btn, cor, tooltip)
-            if texto == 'Zoom +':
-                btn.w = 88
-            elif texto == 'Zoom -':
-                btn.x = 102
-                btn.w = 88
-                y -= 28  # Mesma linha
-            self.botoes_view.append(btn)
-            y += 28
+        for texto, tecla, cor in sistema_btns:
+            btn = Botao(MARGIN, y, BTN_W, BTN_H, texto, tecla, bg_btn, cor, "")
+            self.botoes_ctrl.append(btn)
+            y += BTN_H + BTN_GAP
 
     def _mouse_callback(self, event, x, y, flags, param):
         self.mouse_x = x
         self.mouse_y = y
 
-        # Atualizar hover
-        for btn in self.botoes_modo + self.botoes_ctrl + self.botoes_view:
+        sidebar_w = self.SIDEBAR_W if self.show_sidebar else 0
+        click_in_sidebar = x < sidebar_w
+
+        # ═══════════════════════════════════════
+        # SELEÇÃO DE ROI (para IA ZONE)
+        # ═══════════════════════════════════════
+        if self.selecting_roi:
+            if click_in_sidebar and event == cv2.EVENT_LBUTTONDOWN:
+                # Verificar se clicou em um botão de source (B-MODE, IA ZONE, IA FULL)
+                clicked_source = False
+                for i, btn in enumerate(self.botoes_source):
+                    if btn.contem(x, y):
+                        clicked_source = True
+                        self.selecting_roi = False
+                        self.roi_start = None
+                        self.roi_end = None
+                        self._set_source_mode(i)
+                        return
+
+                # Se não clicou em source, cancelar seleção e voltar para B-MODE
+                if not clicked_source:
+                    self.selecting_roi = False
+                    self.roi_start = None
+                    self.roi_end = None
+                    self.source_mode = 0
+                    self._invalidate_sidebar()
+                    print("Seleção cancelada")
+                return
+
+            if not click_in_sidebar:
+                # Converter coordenadas
+                def display_to_image(dx, dy):
+                    dx = dx - sidebar_w - self.display_offset_x
+                    dy = dy - self.display_offset_y
+                    if self.display_scale > 0:
+                        return max(0, int(dx / self.display_scale)), max(0, int(dy / self.display_scale))
+                    return dx, dy
+
+                if event == cv2.EVENT_LBUTTONDOWN:
+                    self.roi_start = display_to_image(x, y)
+                    self.roi_end = self.roi_start
+                    self.process_roi = None  # Reset enquanto arrasta
+                elif event == cv2.EVENT_MOUSEMOVE and self.roi_start:
+                    self.roi_end = display_to_image(x, y)
+                    # Atualizar ROI em tempo real para preview
+                    x1, y1 = self.roi_start
+                    x2, y2 = self.roi_end
+                    if abs(x2 - x1) > 10 and abs(y2 - y1) > 10:
+                        self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+                elif event == cv2.EVENT_LBUTTONUP and self.roi_start:
+                    self.roi_end = display_to_image(x, y)
+                    x1, y1 = self.roi_start
+                    x2, y2 = self.roi_end
+                    if abs(x2 - x1) > 30 and abs(y2 - y1) > 30:
+                        self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+                        print(f"ROI selecionada: {self.process_roi[2]}x{self.process_roi[3]} - Pressione ENTER para confirmar")
+                    else:
+                        self.process_roi = None
+                        print("Arraste para criar uma área maior (min 30x30)")
+                    self.roi_start = None
+                    self.roi_end = None
+            return
+
+        # ═══════════════════════════════════════
+        # HOVER em todos os botões
+        # ═══════════════════════════════════════
+        all_btns = self.botoes_source + self.botoes_modo + self.botoes_ctrl + self.botoes_view
+        for btn in all_btns:
             btn.hover = btn.contem(x, y)
 
-        if event != cv2.EVENT_LBUTTONDOWN:
+        if event != cv2.EVENT_LBUTTONDOWN or not self.show_sidebar:
             return
 
-        if not self.show_sidebar:
-            return
+        # ═══════════════════════════════════════
+        # CLIQUE NOS BOTÕES SOURCE (B-MODE / IA ZONE / IA FULL)
+        # ═══════════════════════════════════════
+        for i, btn in enumerate(self.botoes_source):
+            if btn.contem(x, y):
+                self._set_source_mode(i)
+                return
 
-        # Cliques nos botoes de modo
+        # ═══════════════════════════════════════
+        # CLIQUE NOS PLUGINS DE IA
+        # ═══════════════════════════════════════
         for i, btn in enumerate(self.botoes_modo):
             if btn.contem(x, y):
-                self._set_modo(i)
+                self._set_plugin(i)
                 return
 
-        # Cliques nos botoes de controle
-        for i, btn in enumerate(self.botoes_ctrl):
+        # ═══════════════════════════════════════
+        # CLIQUE NOS CONTROLES
+        # ═══════════════════════════════════════
+        for btn in self.botoes_ctrl:
             if btn.contem(x, y):
-                if i == 0:
+                if btn.texto == 'FREEZE':
                     self._toggle_pause()
-                elif i == 1:
-                    self._toggle_ai()
-                elif i == 2:
+                elif btn.texto == 'REC':
                     self._toggle_recording()
-                elif i == 3:
+                elif btn.texto == 'CAPTURE':
                     self._screenshot()
-                elif i == 4:
-                    self._toggle_biplane()
-                return
-
-        # Cliques nos botoes de view
-        for i, btn in enumerate(self.botoes_view):
-            if btn.contem(x, y):
-                if btn.texto == 'Zoom +':
-                    self._zoom_in()
-                elif btn.texto == 'Zoom -':
-                    self._zoom_out()
-                elif btn.texto == 'Reset':
-                    self._reset_view()
-                elif btn.texto == 'Overlays':
-                    self._toggle_overlays()
-                elif btn.texto == 'Sidebar':
-                    self._toggle_sidebar()
-                elif btn.texto == 'Ajuda':
+                elif btn.texto == 'FULLSCREEN':
+                    self._toggle_fullscreen()
+                elif btn.texto == 'HELP':
                     self.show_help = not self.show_help
+                elif btn.texto == 'EXIT':
+                    self.running = False
                 return
 
-    def _set_modo(self, idx):
-        if 0 <= idx < len(self.MODOS):
-            self.modo_idx = idx
-            nome = self.MODOS[idx][0]
-            print(f"Modo: {nome}")
-            if self.ai:
-                mode_map = {
-                    0: None, 1: 'needle', 2: 'nerve', 3: 'cardiac',
-                    4: 'fast', 5: 'segment', 6: 'm_mode', 7: 'color',
-                    8: 'power', 9: 'b_lines', 10: 'bladder'
-                }
-                self.ai.set_mode(mode_map.get(idx))
+        # ═══════════════════════════════════════
+        # CLIQUE NOS BOTÕES DE ZOOM
+        # ═══════════════════════════════════════
+        for btn in self.botoes_view:
+            if btn.contem(x, y):
+                if btn.texto == '+':
+                    self._zoom_in()
+                elif btn.texto == '-':
+                    self._zoom_out()
+                return
 
-    def _toggle_pause(self):
-        self.pause = not self.pause
-        print(f"Pause: {'ON' if self.pause else 'OFF'}")
+    def _invalidate_sidebar(self):
+        """Marca sidebar para redesenho"""
+        self._sidebar_dirty = True
 
-    def _toggle_ai(self):
-        self.ai_on = not self.ai_on
-        if self.ai_on and self.ai is None:
+    def _set_source_mode(self, mode):
+        """Define o modo fonte: 0=B-MODE, 1=IA ZONE, 2=IA FULL"""
+        if mode == self.source_mode:
+            return
+
+        self.source_mode = mode
+        self._invalidate_sidebar()
+
+        if mode == 0:  # B-MODE
+            self.process_roi = None
+            self.selecting_roi = False
+            print("B-MODE")
+
+        elif mode == 1:  # IA ZONE
+            self.process_roi = None
+            self.selecting_roi = True
+            print("IA ZONE - arraste na imagem para selecionar região")
+
+        elif mode == 2:  # IA FULL
+            self.process_roi = None
+            self.selecting_roi = False
+            self._load_ai_if_needed()
+            print("IA FULL - IA aplicada em toda a imagem")
+
+    def _set_plugin(self, idx):
+        """Define o plugin de IA selecionado"""
+        if idx == self.plugin_idx:
+            return
+
+        self.plugin_idx = idx
+        self._invalidate_sidebar()
+        nome = self.MODOS[idx + 1][0]
+        print(f"Plugin: {nome}")
+
+        # Configurar modo na IA
+        mode_map = {
+            0: 'needle', 1: 'nerve', 2: 'cardiac', 3: 'fast',
+            4: 'segment', 5: 'm_mode', 6: 'color', 7: 'power',
+            8: 'b_lines', 9: 'bladder'
+        }
+
+        if self.ai:
+            self.ai.set_mode(mode_map.get(idx, 'needle'))
+
+    def _load_ai_if_needed(self):
+        """Carrega a IA se ainda não foi carregada"""
+        if self.ai is None:
             try:
                 from src.ai_processor import AIProcessor
                 self.ai = AIProcessor()
-                # Configurar modo atual
-                self._set_modo(self.modo_idx)
+                # Configurar plugin atual
+                mode_map = {
+                    0: 'needle', 1: 'nerve', 2: 'cardiac', 3: 'fast',
+                    4: 'segment', 5: 'm_mode', 6: 'color', 7: 'power',
+                    8: 'b_lines', 9: 'bladder'
+                }
+                self.ai.set_mode(mode_map.get(self.plugin_idx, 'needle'))
+                print("IA carregada")
             except Exception as e:
-                print(f"Erro AI: {e}")
-                self.ai_on = False
-        print(f"AI: {'ON' if self.ai_on else 'OFF'}")
+                print(f"Erro ao carregar IA: {e}")
+
+    def _toggle_pause(self):
+        self.pause = not self.pause
+        self._invalidate_sidebar()
 
     def _toggle_recording(self):
         self.recording = not self.recording
+        self._invalidate_sidebar()
         if self.recording:
             self.recorder.start_recording()
         else:
             self.recorder.stop_recording()
-        print(f"Gravacao: {'ON' if self.recording else 'OFF'}")
 
     def _screenshot(self):
         if self.frame_original is not None:
@@ -370,30 +572,27 @@ class USGApp:
 
     def _toggle_sidebar(self):
         self.show_sidebar = not self.show_sidebar
+        self._invalidate_sidebar()
 
     def _toggle_overlays(self):
         self.show_overlays = not self.show_overlays
-        print(f"Overlays: {'ON' if self.show_overlays else 'OFF'}")
 
     def _toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
+        self._invalidate_sidebar()
         if self.fullscreen:
-            # Ir para fullscreen
             cv2.setWindowProperty(self.janela, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-            cv2.moveWindow(self.janela, 0, 0)
         else:
-            # Sair do fullscreen
             cv2.setWindowProperty(self.janela, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self.janela, 1700, 950)
-            cv2.moveWindow(self.janela, 50, 50)
-        print(f"Fullscreen: {'ON' if self.fullscreen else 'OFF'}")
+            cv2.resizeWindow(self.janela, 1400, 800)
 
     def _get_screen_size(self):
-        """Obtem tamanho da tela para fullscreen."""
+        """Obtem tamanho TOTAL da tela (para fullscreen real)."""
         try:
-            import Quartz
-            main_monitor = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
-            return int(main_monitor.size.width), int(main_monitor.size.height)
+            from AppKit import NSScreen
+            screen = NSScreen.mainScreen()
+            frame = screen.frame()
+            return int(frame.size.width), int(frame.size.height)
         except:
             return 1920, 1080  # Fallback
 
@@ -425,85 +624,298 @@ class USGApp:
 
     def _desenhar_sidebar(self, altura):
         sidebar = np.zeros((altura, self.SIDEBAR_W, 3), dtype=np.uint8)
-        sidebar[:] = (20, 20, 25)
+        sidebar[:] = (15, 15, 20)
 
-        # Logo
-        cv2.putText(sidebar, "USG", (15, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 165, 0), 2, cv2.LINE_AA)
-        cv2.putText(sidebar, "FLOW", (62, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.line(sidebar, (10, 42), (190, 42), (40, 40, 50), 1)
+        # Borda direita
+        cv2.line(sidebar, (self.SIDEBAR_W - 1, 0), (self.SIDEBAR_W - 1, altura), (30, 30, 40), 1)
 
-        # Label MODOS
-        cv2.putText(sidebar, "MODOS", (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 110), 1, cv2.LINE_AA)
+        # HEADER (com LINE_AA para visual premium)
+        cv2.rectangle(sidebar, (0, 0), (self.SIDEBAR_W, 64), (20, 20, 28), -1)
+        cv2.putText(sidebar, "USG", (28, 38), cv2.FONT_HERSHEY_DUPLEX, 0.9, (0, 200, 255), 2, cv2.LINE_AA)
+        cv2.putText(sidebar, "FLOW", (88, 38), cv2.FONT_HERSHEY_DUPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(sidebar, "AI Ultrasound", (28, 54), cv2.FONT_HERSHEY_DUPLEX, 0.35, (70, 70, 90), 1, cv2.LINE_AA)
+        cv2.line(sidebar, (0, 64), (self.SIDEBAR_W, 64), (0, 180, 220), 2)
 
-        # Botoes de modo
+        # ═══════════════════════════════════════
+        # GRUPO EXCLUSIVO (B-MODE / IA ZONE / IA FULL)
+        # ═══════════════════════════════════════
+        for i, btn in enumerate(self.botoes_source):
+            btn.ativo = (i == self.source_mode) or (i == 1 and self.selecting_roi)
+            btn.desenhar(sidebar)
+
+        # TÍTULO "PLUGINS IA"
+        ia_ativa = self.source_mode > 0
+        titulo_cor = (110, 110, 130) if ia_ativa else (55, 55, 70)
+        cv2.line(sidebar, (30, self.plugins_title_y), (self.SIDEBAR_W - 30, self.plugins_title_y), (35, 35, 45), 1)
+        cv2.putText(sidebar, "PLUGINS IA", (30, self.plugins_title_y + 15),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.4, titulo_cor, 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════
+        # PLUGINS DE IA
+        # ═══════════════════════════════════════
         for i, btn in enumerate(self.botoes_modo):
-            btn.ativo = (i == self.modo_idx)
+            btn.ativo = (i == self.plugin_idx) and ia_ativa
+            if not ia_ativa:
+                btn.hover = False
             btn.desenhar(sidebar)
 
-        # Separador
-        y_sep = self.botoes_modo[-1].y + self.botoes_modo[-1].h + 8
-        cv2.line(sidebar, (10, y_sep), (190, y_sep), (40, 40, 50), 1)
-        cv2.putText(sidebar, "CONTROLES", (10, y_sep + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 110), 1, cv2.LINE_AA)
+        # TÍTULO "RECORDING"
+        cv2.line(sidebar, (30, self.recording_title_y), (self.SIDEBAR_W - 30, self.recording_title_y), (35, 35, 45), 1)
+        cv2.putText(sidebar, "RECORDING", (30, self.recording_title_y + 15),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (110, 110, 130), 1, cv2.LINE_AA)
 
-        # Botoes de controle
-        self.botoes_ctrl[0].ativo = self.pause
-        self.botoes_ctrl[1].ativo = self.ai_on
-        self.botoes_ctrl[2].ativo = self.recording
-        self.botoes_ctrl[4].ativo = self.biplane_active
-        for btn in self.botoes_ctrl:
+        # Botões de recording (FREEZE, REC, CAPTURE)
+        for btn in self.botoes_ctrl[:3]:
+            if btn.texto == 'FREEZE':
+                btn.ativo = self.pause
+            elif btn.texto == 'REC':
+                btn.ativo = self.recording
             btn.desenhar(sidebar)
 
-        # Separador
-        y_sep2 = self.botoes_ctrl[-1].y + self.botoes_ctrl[-1].h + 8
-        cv2.line(sidebar, (10, y_sep2), (190, y_sep2), (40, 40, 50), 1)
-        cv2.putText(sidebar, "VISUALIZACAO", (10, y_sep2 + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 110), 1, cv2.LINE_AA)
+        # TÍTULO "SYSTEM"
+        cv2.line(sidebar, (30, self.system_title_y), (self.SIDEBAR_W - 30, self.system_title_y), (35, 35, 45), 1)
+        cv2.putText(sidebar, "SYSTEM", (30, self.system_title_y + 15),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (110, 110, 130), 1, cv2.LINE_AA)
 
-        # Botoes de view
+        # Zoom
         for btn in self.botoes_view:
-            if btn.texto == 'Overlays':
-                btn.ativo = self.show_overlays
-            elif btn.texto == 'Ajuda':
+            btn.desenhar(sidebar)
+
+        # Botões de sistema (FULLSCREEN, HELP, EXIT)
+        for btn in self.botoes_ctrl[3:]:
+            if btn.texto == 'FULLSCREEN':
+                btn.ativo = self.fullscreen
+            elif btn.texto == 'HELP':
                 btn.ativo = self.show_help
             btn.desenhar(sidebar)
 
-        # Footer - Status
-        footer_y = altura - 85
-        cv2.line(sidebar, (10, footer_y), (190, footer_y), (40, 40, 50), 1)
+        # FOOTER (mais compacto)
+        footer_y = altura - 60
+        cv2.rectangle(sidebar, (0, footer_y), (self.SIDEBAR_W, altura), (12, 12, 18), -1)
+        cv2.line(sidebar, (28, footer_y + 2), (self.SIDEBAR_W - 28, footer_y + 2), (35, 35, 45), 1)
 
-        # Conexao
+        # Status + FPS na mesma linha
         sy = footer_y + 18
         if self.captura.connected:
-            cv2.circle(sidebar, (20, sy - 4), 4, (100, 255, 100), -1)
-            cv2.putText(sidebar, "Conectado", (30, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 255, 100), 1, cv2.LINE_AA)
+            cv2.circle(sidebar, (38, sy - 3), 4, (80, 220, 80), -1)
+            cv2.putText(sidebar, "ONLINE", (52, sy), cv2.FONT_HERSHEY_DUPLEX, 0.35, (80, 220, 80), 1, cv2.LINE_AA)
         else:
-            cv2.circle(sidebar, (20, sy - 4), 4, (80, 80, 80), -1)
-            cv2.putText(sidebar, "Aguardando...", (30, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (80, 80, 80), 1, cv2.LINE_AA)
+            cv2.circle(sidebar, (38, sy - 3), 4, (80, 80, 100), -1)
+            cv2.putText(sidebar, "WAITING", (52, sy), cv2.FONT_HERSHEY_DUPLEX, 0.35, (80, 80, 100), 1, cv2.LINE_AA)
 
-        # FPS
+        # FPS ao lado
+        fps_cor = (80, 220, 80) if self.fps >= 25 else (0, 180, 220) if self.fps >= 15 else (100, 100, 180)
+        cv2.putText(sidebar, f"{self.fps} FPS", (140, sy), cv2.FONT_HERSHEY_DUPLEX, 0.38, fps_cor, 1, cv2.LINE_AA)
+        fps_bar_w = min(self.fps * 2, 80)
+        cv2.rectangle(sidebar, (195, sy - 7), (self.SIDEBAR_W - 15, sy - 1), (30, 30, 40), -1)
+        cv2.rectangle(sidebar, (195, sy - 7), (195 + fps_bar_w, sy - 1), fps_cor, -1)
+
+        # Modo
         sy += 18
-        fps_cor = (100, 255, 100) if self.fps >= 25 else (0, 200, 255) if self.fps >= 15 else (0, 100, 255)
-        cv2.putText(sidebar, f"FPS: {self.fps}", (15, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.4, fps_cor, 1, cv2.LINE_AA)
+        source_names = ['B-MODE', 'IA ZONE', 'IA FULL']
+        source_cors = [(140, 140, 160), (255, 200, 60), (100, 220, 140)]
+        modo_nome = source_names[self.source_mode]
+        modo_cor = source_cors[self.source_mode]
+        if self.source_mode > 0:
+            modo_nome = f"{modo_nome} | {self.MODOS[self.plugin_idx + 1][0]}"
+        cv2.putText(sidebar, modo_nome, (38, sy), cv2.FONT_HERSHEY_DUPLEX, 0.38, modo_cor, 1, cv2.LINE_AA)
 
-        # REC
-        if self.recording:
-            if int(time.time() * 2) % 2:
-                cv2.circle(sidebar, (160, sy - 5), 6, (0, 0, 255), -1)
-            cv2.putText(sidebar, "REC", (130, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1, cv2.LINE_AA)
-
-        # Modo e Zoom
-        sy += 18
-        modo_nome = self.MODOS[self.modo_idx][0]
-        modo_cor = self.MODOS[self.modo_idx][2]
-        cv2.putText(sidebar, f"{modo_nome}", (15, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.35, modo_cor, 1, cv2.LINE_AA)
-        cv2.putText(sidebar, f"Zoom: {self.zoom_level:.1f}x", (110, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 110), 1, cv2.LINE_AA)
-
-        # Resolucao
-        if self.frame_original is not None:
-            h, w = self.frame_original.shape[:2]
-            sy += 16
-            cv2.putText(sidebar, f"{w}x{h}", (15, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (80, 80, 90), 1, cv2.LINE_AA)
+        # REC piscando
+        if self.recording and int(time.time() * 2) % 2:
+            cv2.circle(sidebar, (self.SIDEBAR_W - 22, footer_y + 18), 5, (0, 0, 255), -1)
+            cv2.putText(sidebar, "REC", (self.SIDEBAR_W - 55, footer_y + 22), cv2.FONT_HERSHEY_DUPLEX, 0.35, (0, 0, 255), 1, cv2.LINE_AA)
 
         return sidebar
+
+    def _desenhar_roi_selection(self, frame):
+        """Desenha overlay profissional de seleção de ROI."""
+        if not self.selecting_roi and self.process_roi is None:
+            return frame
+
+        h, w = frame.shape[:2]
+        overlay = frame.copy()
+
+        # Determinar coordenadas da ROI
+        if self.roi_start and self.roi_end:
+            # Seleção em andamento
+            x1, y1 = self.roi_start
+            x2, y2 = self.roi_end
+            rx, ry = min(x1, x2), min(y1, y2)
+            rw, rh = abs(x2 - x1), abs(y2 - y1)
+        elif self.process_roi:
+            # ROI já definida
+            rx, ry, rw, rh = self.process_roi
+        else:
+            # Nenhuma ROI ainda - mostrar instrução
+            if self.selecting_roi:
+                # Fundo escurecido
+                cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 0), -1)
+                cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+
+                # Texto de instrução centralizado
+                texto = "ARRASTE PARA SELECIONAR A REGIAO"
+                (tw, th), _ = cv2.getTextSize(texto, cv2.FONT_HERSHEY_DUPLEX, 0.7, 2)
+                tx = (w - tw) // 2
+                ty = h // 2
+                cv2.putText(frame, texto, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+
+                texto2 = "ESC para cancelar"
+                (tw2, _), _ = cv2.getTextSize(texto2, cv2.FONT_HERSHEY_DUPLEX, 0.5, 1)
+                cv2.putText(frame, texto2, ((w - tw2) // 2, ty + 40), cv2.FONT_HERSHEY_DUPLEX, 0.5, (150, 150, 150), 1, cv2.LINE_AA)
+            return frame
+
+        if rw < 5 or rh < 5:
+            return frame
+
+        # ═══════════════════════════════════════
+        # OVERLAY ESCURO FORA DA SELEÇÃO
+        # ═══════════════════════════════════════
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.rectangle(mask, (rx, ry), (rx + rw, ry + rh), 255, -1)
+
+        # Escurecer área fora da seleção
+        dark_overlay = frame.copy()
+        dark_overlay[mask == 0] = (dark_overlay[mask == 0] * 0.4).astype(np.uint8)
+        frame = dark_overlay
+
+        # ═══════════════════════════════════════
+        # BORDA ANIMADA (MARCHING ANTS)
+        # ═══════════════════════════════════════
+        self.roi_animation_frame = (self.roi_animation_frame + 1) % 16
+        offset = self.roi_animation_frame
+
+        # Linha tracejada animada
+        for i in range(0, rw + rh * 2, 8):
+            # Topo
+            if i < rw:
+                px = rx + (i + offset) % rw
+                cv2.line(frame, (px, ry), (min(px + 4, rx + rw), ry), (0, 255, 255), 2)
+            # Direita
+            if i < rh:
+                py = ry + (i + offset) % rh
+                cv2.line(frame, (rx + rw, py), (rx + rw, min(py + 4, ry + rh)), (0, 255, 255), 2)
+            # Baixo
+            if i < rw:
+                px = rx + rw - (i + offset) % rw
+                cv2.line(frame, (px, ry + rh), (max(px - 4, rx), ry + rh), (0, 255, 255), 2)
+            # Esquerda
+            if i < rh:
+                py = ry + rh - (i + offset) % rh
+                cv2.line(frame, (rx, py), (rx, max(py - 4, ry)), (0, 255, 255), 2)
+
+        # Borda sólida fina por baixo
+        cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), (0, 200, 200), 1)
+
+        # ═══════════════════════════════════════
+        # HANDLES NOS CANTOS (para redimensionar)
+        # ═══════════════════════════════════════
+        handle_size = 8
+        handle_color = (255, 255, 255)
+        handle_border = (0, 0, 0)
+
+        handles = [
+            (rx, ry),                    # Top-left
+            (rx + rw, ry),               # Top-right
+            (rx, ry + rh),               # Bottom-left
+            (rx + rw, ry + rh),          # Bottom-right
+        ]
+
+        for hx, hy in handles:
+            cv2.rectangle(frame, (hx - handle_size//2, hy - handle_size//2),
+                         (hx + handle_size//2, hy + handle_size//2), handle_border, -1)
+            cv2.rectangle(frame, (hx - handle_size//2 + 1, hy - handle_size//2 + 1),
+                         (hx + handle_size//2 - 1, hy + handle_size//2 - 1), handle_color, -1)
+
+        # ═══════════════════════════════════════
+        # CROSSHAIR CENTRAL (guias de centro)
+        # ═══════════════════════════════════════
+        cx, cy = rx + rw // 2, ry + rh // 2
+        cross_size = min(rw, rh) // 6
+        cross_color = (0, 255, 255)
+
+        # Linhas do crosshair (tracejadas)
+        for i in range(0, cross_size, 6):
+            # Horizontal
+            cv2.line(frame, (cx - cross_size + i, cy), (cx - cross_size + i + 3, cy), cross_color, 1)
+            cv2.line(frame, (cx + i, cy), (cx + i + 3, cy), cross_color, 1)
+            # Vertical
+            cv2.line(frame, (cx, cy - cross_size + i), (cx, cy - cross_size + i + 3), cross_color, 1)
+            cv2.line(frame, (cx, cy + i), (cx, cy + i + 3), cross_color, 1)
+
+        # Círculo central pequeno
+        cv2.circle(frame, (cx, cy), 3, cross_color, 1)
+
+        # ═══════════════════════════════════════
+        # GRID DE REGRA DOS TERÇOS (linhas sutis)
+        # ═══════════════════════════════════════
+        if rw > 100 and rh > 100:  # Só mostrar se ROI for grande o suficiente
+            third_color = (60, 60, 60)
+            # Linhas verticais (terços)
+            for i in [1, 2]:
+                lx = rx + (rw * i) // 3
+                cv2.line(frame, (lx, ry), (lx, ry + rh), third_color, 1)
+            # Linhas horizontais (terços)
+            for i in [1, 2]:
+                ly = ry + (rh * i) // 3
+                cv2.line(frame, (rx, ly), (rx + rw, ly), third_color, 1)
+
+        # ═══════════════════════════════════════
+        # INFORMAÇÕES DA SELEÇÃO
+        # ═══════════════════════════════════════
+        # Dimensões com mais detalhes
+        dim_text = f"{rw} x {rh} px"
+        area_text = f"Area: {(rw * rh) // 1000}K px"
+
+        (tw, th), _ = cv2.getTextSize(dim_text, cv2.FONT_HERSHEY_DUPLEX, 0.5, 1)
+
+        # Posição do texto (acima ou abaixo da seleção)
+        if ry > 50:
+            text_y = ry - 8
+        else:
+            text_y = ry + rh + 22
+        text_x = rx + (rw - tw) // 2
+
+        # Background do texto com cantos arredondados (simulado)
+        pad = 8
+        cv2.rectangle(frame, (text_x - pad, text_y - th - pad), (text_x + tw + pad, text_y + pad), (20, 20, 25), -1)
+        cv2.rectangle(frame, (text_x - pad, text_y - th - pad), (text_x + tw + pad, text_y + pad), (0, 200, 200), 1)
+        cv2.putText(frame, dim_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════
+        # BARRA DE STATUS INFERIOR (premium)
+        # ═══════════════════════════════════════
+        if self.selecting_roi:
+            bar_h = 45
+            bar_y = h - bar_h
+
+            # Fundo gradiente simulado
+            overlay_bar = frame.copy()
+            cv2.rectangle(overlay_bar, (0, bar_y), (w, h), (15, 15, 20), -1)
+            cv2.addWeighted(overlay_bar, 0.9, frame, 0.1, 0, frame)
+
+            # Linha de separação
+            cv2.line(frame, (0, bar_y), (w, bar_y), (0, 180, 200), 2)
+
+            # Ícones e texto
+            icon_y = bar_y + 28
+
+            if self.process_roi:
+                # ROI definida - mostrar opções
+                # ENTER
+                cv2.rectangle(frame, (w//2 - 180, icon_y - 16), (w//2 - 100, icon_y + 8), (0, 150, 150), -1)
+                cv2.putText(frame, "ENTER", (w//2 - 172, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, "Confirmar", (w//2 - 95, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.4, (150, 150, 150), 1, cv2.LINE_AA)
+
+                # ESC
+                cv2.rectangle(frame, (w//2 + 20, icon_y - 16), (w//2 + 80, icon_y + 8), (100, 60, 60), -1)
+                cv2.putText(frame, "ESC", (w//2 + 32, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, "Cancelar", (w//2 + 88, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.4, (150, 150, 150), 1, cv2.LINE_AA)
+            else:
+                # Sem ROI - instrução de arraste
+                cv2.putText(frame, "Clique e arraste para selecionar a regiao de interesse",
+                           (w//2 - 220, icon_y), cv2.FONT_HERSHEY_DUPLEX, 0.45, (150, 200, 200), 1, cv2.LINE_AA)
+
+        return frame
 
     def _desenhar_instrucoes(self, frame):
         """Desenha instrucoes contextuais na parte inferior."""
@@ -511,7 +923,11 @@ class USGApp:
             return frame
 
         h, w = frame.shape[:2]
-        modo_nome = self.MODOS[self.modo_idx][0]
+        # Se IA ativa, mostrar instrução do plugin
+        if self.source_mode > 0:
+            modo_nome = self.MODOS[self.plugin_idx + 1][0]
+        else:
+            modo_nome = 'B-MODE'
         instrucao = MODE_INSTRUCTIONS.get(modo_nome, "")
 
         if not instrucao:
@@ -545,20 +961,20 @@ class USGApp:
 
         # Lista de atalhos
         atalhos = [
-            ("1-9, 0, V", "Selecionar modo"),
+            ("1", "B-MODE (sem IA)"),
+            ("C", "IA ZONE (selecionar regiao)"),
+            ("A", "IA FULL (IA em toda tela)"),
+            ("2-9, 0, V", "Selecionar plugin IA"),
             ("F", "Freeze/Pause"),
-            ("A", "Ativar/Desativar AI"),
             ("R", "Iniciar/Parar gravacao"),
             ("S", "Screenshot (PNG)"),
             ("B", "Toggle Biplane"),
             ("H", "Esconder/Mostrar overlays"),
             ("I", "Esconder/Mostrar instrucoes"),
-            ("T", "Esconder/Mostrar sidebar"),
             ("+/-", "Zoom In/Out"),
             ("Setas", "Pan (mover imagem)"),
-            ("0 (view)", "Reset visualizacao"),
             ("?", "Esta ajuda"),
-            ("F11", "Fullscreen"),
+            ("X", "Fullscreen"),
             ("Q/ESC", "Sair"),
         ]
 
@@ -622,12 +1038,32 @@ class USGApp:
                 # Imagem para display (COPIA do original)
                 display_img = self.frame_original.copy()
 
-                # AI (se ligada)
-                if self.ai_on and self.ai:
+                # AI (se IA ZONE ou IA FULL ativo)
+                ia_ativa = self.source_mode > 0 and self.ai is not None
+                if ia_ativa:
                     try:
-                        display_img = self.ai.process(display_img)
-                    except:
+                        if self.source_mode == 1 and self.process_roi:
+                            # IA ZONE - processar apenas a ROI
+                            rx, ry, rw, rh = self.process_roi
+                            rx = max(0, min(rx, w))
+                            ry = max(0, min(ry, h))
+                            rw = min(rw, w - rx)
+                            rh = min(rh, h - ry)
+
+                            if rw > 10 and rh > 10:
+                                roi = display_img[ry:ry+rh, rx:rx+rw].copy()
+                                roi_processed = self.ai.process(roi)
+                                display_img[ry:ry+rh, rx:rx+rw] = roi_processed
+                                cv2.rectangle(display_img, (rx, ry), (rx+rw, ry+rh), (0, 255, 255), 2)
+                        elif self.source_mode == 2:
+                            # IA FULL - processar tudo
+                            display_img = self.ai.process(display_img)
+                    except Exception as e:
                         pass
+
+                # Sistema profissional de seleção de ROI
+                if self.selecting_roi or (self.source_mode == 1 and self.process_roi):
+                    display_img = self._desenhar_roi_selection(display_img)
 
                 # Zoom/Pan
                 display_img = self._aplicar_zoom_pan(display_img)
@@ -645,9 +1081,43 @@ class USGApp:
                 if self.show_overlays:
                     display_img = self._desenhar_instrucoes(display_img)
 
+                # Escalar imagem para preencher área disponível
+                if self.fullscreen:
+                    # Fullscreen: usar tamanho da tela
+                    screen_w, screen_h = self._get_screen_size()
+                    target_w = screen_w - (self.SIDEBAR_W if self.show_sidebar else 0)
+                    target_h = screen_h
+                else:
+                    # Janela normal: 1400x800
+                    target_w = 1400 - (self.SIDEBAR_W if self.show_sidebar else 0)
+                    target_h = 800
+
+                img_h, img_w = display_img.shape[:2]
+
+                # Calcular escala mantendo proporção
+                scale = min(target_w / img_w, target_h / img_h)
+                new_w = int(img_w * scale)
+                new_h = int(img_h * scale)
+
+                # Guardar info de escala para conversão de coordenadas
+                self.display_scale = scale
+                self.display_offset_x = (target_w - new_w) // 2
+                self.display_offset_y = (target_h - new_h) // 2
+
+                # Redimensionar
+                display_img = cv2.resize(display_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+                # Criar canvas preto e centralizar imagem
+                canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+                canvas[:] = (12, 12, 15)  # Fundo escuro
+
+                # Centralizar
+                canvas[self.display_offset_y:self.display_offset_y+new_h, self.display_offset_x:self.display_offset_x+new_w] = display_img
+                display_img = canvas
+
                 # Sidebar
                 if self.show_sidebar:
-                    sidebar = self._desenhar_sidebar(display_img.shape[0])
+                    sidebar = self._desenhar_sidebar(target_h)
                     display = np.hstack([sidebar, display_img])
                 else:
                     display = display_img
@@ -658,15 +1128,23 @@ class USGApp:
 
             else:
                 # Tela de espera
-                h = 720
-                espera = np.zeros((h, 1280, 3), dtype=np.uint8)
+                if self.fullscreen:
+                    screen_w, screen_h = self._get_screen_size()
+                    h = screen_h
+                    w = screen_w - (self.SIDEBAR_W if self.show_sidebar else 0)
+                else:
+                    h = 800
+                    w = 1200
+
+                espera = np.zeros((h, w, 3), dtype=np.uint8)
                 espera[:] = (12, 12, 15)
-                cv2.putText(espera, "AGUARDANDO SINAL", (450, 320),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (80, 80, 80), 2)
-                cv2.putText(espera, "Conecte iPhone via QuickTime", (420, 370),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 1)
-                cv2.putText(espera, "Menu > Arquivo > Nova Gravacao de Filme > iPhone", (350, 410),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (60, 60, 70), 1)
+                cx, cy = w // 2, h // 2
+                cv2.putText(espera, "AGUARDANDO SINAL", (cx - 180, cy - 30),
+                            cv2.FONT_HERSHEY_DUPLEX, 1.1, (80, 80, 90), 2, cv2.LINE_AA)
+                cv2.putText(espera, "Conecte iPhone via QuickTime", (cx - 190, cy + 20),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 165, 0), 1, cv2.LINE_AA)
+                cv2.putText(espera, "Menu > Arquivo > Nova Gravacao de Filme > iPhone", (cx - 250, cy + 60),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.4, (60, 60, 70), 1, cv2.LINE_AA)
 
                 if self.show_sidebar:
                     sidebar = self._desenhar_sidebar(h)
@@ -674,11 +1152,9 @@ class USGApp:
                 else:
                     display = espera
 
-            # Fullscreen: redimensionar para preencher a tela toda
-            if self.fullscreen:
-                screen_w, screen_h = self._get_screen_size()
-                if display.shape[1] != screen_w or display.shape[0] != screen_h:
-                    display = cv2.resize(display, (screen_w, screen_h), interpolation=cv2.INTER_LINEAR)
+                # Ajuda
+                if self.show_help:
+                    display = self._desenhar_ajuda(display)
 
             cv2.imshow(self.janela, display)
 
@@ -691,12 +1167,36 @@ class USGApp:
 
             # Teclas
             k = cv2.waitKey(1) & 0xFF
-            if k == ord('q') or k == 27:
+            if k == 27:  # ESC
+                if self.selecting_roi:
+                    self.selecting_roi = False
+                    self.roi_start = None
+                    self.roi_end = None
+                    self.process_roi = None
+                    self.source_mode = 0  # Voltar para B-MODE
+                    self._invalidate_sidebar()
+                    print("Seleção cancelada")
+                else:
+                    break
+            elif k == 13 or k == 10:  # ENTER - confirmar ROI
+                if self.selecting_roi and self.process_roi:
+                    self.selecting_roi = False
+                    self.roi_confirmed = True
+                    self._load_ai_if_needed()
+                    print(f"ROI confirmada: {self.process_roi}")
+            elif k == ord('q'):
                 break
             elif k == ord('f'):
                 self._toggle_pause()
+            elif k == ord('1'):
+                # B-MODE
+                self._set_source_mode(0)
+            elif k == ord('c'):
+                # IA ZONE
+                self._set_source_mode(1)
             elif k == ord('a'):
-                self._toggle_ai()
+                # IA FULL
+                self._set_source_mode(2)
             elif k == ord('r'):
                 self._toggle_recording()
             elif k == ord('s'):
@@ -707,13 +1207,10 @@ class USGApp:
                 self._toggle_overlays()
             elif k == ord('i'):
                 self.show_instructions = not self.show_instructions
-            elif k == ord('t'):
-                self._toggle_sidebar()
             elif k == ord('+') or k == ord('='):
                 self._zoom_in()
             elif k == ord('-'):
                 self._zoom_out()
-            # Setas (codigos variam por sistema - testando multiplos)
             elif k == 82 or k == 0:  # Seta cima
                 self._pan_up()
             elif k == 84 or k == 1:  # Seta baixo
@@ -724,19 +1221,18 @@ class USGApp:
                 self._pan_right()
             elif k == ord('/') or k == ord('?'):
                 self.show_help = not self.show_help
-            # F11 (varios codigos possiveis)
-            elif k == 122 or k == 201 or k == 144:  # F11
+            elif k == ord('x') or k == 122 or k == 201 or k == 144:
                 self._toggle_fullscreen()
-            # Modos por numero
-            elif ord('1') <= k <= ord('9'):
-                self._set_modo(k - ord('1'))
+            # Plugins por numero (2-9, 0, V)
+            elif ord('2') <= k <= ord('9'):
+                self._set_plugin(k - ord('2'))  # 2=NEEDLE(0), 3=NERVE(1), etc
             elif k == ord('0'):
                 if self.zoom_level != 1.0 or self.pan_y != 0:
                     self._reset_view()
                 else:
-                    self._set_modo(9)  # PULMAO
+                    self._set_plugin(8)  # LUNG
             elif k == ord('v'):
-                self._set_modo(10)  # BEXIGA
+                self._set_plugin(9)  # BLADDER
 
         # Cleanup
         if self.recording:
