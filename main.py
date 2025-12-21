@@ -1,904 +1,711 @@
 #!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                        APLICATIVO USG FINAL                                   ║
-║                                                                                ║
-║  100% Python/OpenCV - ZERO conversao de imagem                                ║
-║  Interface Premium inspirada em Apple + Butterfly iQ3                         ║
-║                                                                                ║
-║  Pixels perfeitos - A imagem exibida e IDENTICA ao que vem do iPhone         ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+USG FLOW - Interface Premium Completa
+======================================
+Baseado no projeto HTML PlataformaUSG.
+Todas as funcionalidades, 100% Python.
+Imagem ORIGINAL preservada (sem modificacao).
 """
 
 import cv2
 import numpy as np
 import time
+import threading
 import os
 import sys
-import math
 
-# Path setup
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import config
-from src.capture import VideoCapture
-from src.design_system import get_design_system, Color
+from src.window_capture import WindowCapture
+from src.clip_recorder import ClipRecorder
 
 
-class PremiumUI:
-    """
-    Interface Premium para o aplicativo USG
-    Design inspirado em Apple Human Interface Guidelines + Butterfly iQ3
-    """
-
-    def __init__(self, width: int, height: int):
-        self.width = width
-        self.height = height
-        self.ds = get_design_system('dark')
-
-        # Layout dimensions
-        self.header_height = 56
-        self.sidebar_width = 300
-        self.footer_height = 48
-        self.padding = 16
-        self.border_radius = 12
-
-        # Animation states
-        self.hover_states = {}
-        self.pulse_phase = 0
-
-        # Precompute colors (BGR for OpenCV)
-        self.c = {
-            'bg': (20, 15, 15),           # Fundo principal
-            'surface': (35, 32, 28),      # Superficie elevada
-            'surface2': (48, 45, 38),     # Superficie mais elevada
-            'border': (75, 70, 60),       # Bordas sutis
-            'text': (255, 255, 255),      # Texto principal
-            'text_dim': (165, 160, 150),  # Texto secundario
-            'text_muted': (115, 110, 100),# Texto terciario
-            'accent': (255, 165, 0),      # Laranja accent (BGR)
-            'accent2': (255, 200, 50),    # Amarelo accent
-            'success': (100, 255, 50),    # Verde
-            'danger': (80, 80, 255),      # Vermelho (BGR)
-            'warning': (0, 200, 255),     # Amarelo warning
-            'info': (255, 150, 50),       # Azul info
-            'medical_needle': (100, 255, 100),  # Verde agulha
-            'medical_nerve': (0, 255, 255),     # Amarelo nervo
-            'medical_artery': (80, 80, 255),    # Vermelho arteria
-            'medical_vein': (255, 100, 100),    # Azul veia
-        }
-
-    def draw_rounded_rect(self, img, pt1, pt2, color, radius=12, thickness=-1, border_color=None):
-        """Desenha retangulo com bordas arredondadas."""
-        x1, y1 = pt1
-        x2, y2 = pt2
-
-        # Limitar radius ao tamanho do retangulo
-        radius = min(radius, (x2 - x1) // 2, (y2 - y1) // 2)
-
-        if thickness == -1:
-            # Preenchido
-            # Retangulos internos
-            cv2.rectangle(img, (x1 + radius, y1), (x2 - radius, y2), color, -1)
-            cv2.rectangle(img, (x1, y1 + radius), (x2, y2 - radius), color, -1)
-
-            # Cantos arredondados
-            cv2.ellipse(img, (x1 + radius, y1 + radius), (radius, radius), 180, 0, 90, color, -1)
-            cv2.ellipse(img, (x2 - radius, y1 + radius), (radius, radius), 270, 0, 90, color, -1)
-            cv2.ellipse(img, (x1 + radius, y2 - radius), (radius, radius), 90, 0, 90, color, -1)
-            cv2.ellipse(img, (x2 - radius, y2 - radius), (radius, radius), 0, 0, 90, color, -1)
-        else:
-            # Apenas borda
-            cv2.line(img, (x1 + radius, y1), (x2 - radius, y1), color, thickness)
-            cv2.line(img, (x1 + radius, y2), (x2 - radius, y2), color, thickness)
-            cv2.line(img, (x1, y1 + radius), (x1, y2 - radius), color, thickness)
-            cv2.line(img, (x2, y1 + radius), (x2, y2 - radius), color, thickness)
-
-            cv2.ellipse(img, (x1 + radius, y1 + radius), (radius, radius), 180, 0, 90, color, thickness)
-            cv2.ellipse(img, (x2 - radius, y1 + radius), (radius, radius), 270, 0, 90, color, thickness)
-            cv2.ellipse(img, (x1 + radius, y2 - radius), (radius, radius), 90, 0, 90, color, thickness)
-            cv2.ellipse(img, (x2 - radius, y2 - radius), (radius, radius), 0, 0, 90, color, thickness)
-
-        if border_color:
-            self.draw_rounded_rect(img, pt1, pt2, border_color, radius, 1)
-
-    def draw_gradient_rect(self, img, pt1, pt2, color1, color2, vertical=True):
-        """Desenha retangulo com gradiente."""
-        x1, y1 = pt1
-        x2, y2 = pt2
-
-        if vertical:
-            for y in range(y1, y2):
-                t = (y - y1) / max(1, (y2 - y1))
-                color = tuple(int(c1 * (1 - t) + c2 * t) for c1, c2 in zip(color1, color2))
-                cv2.line(img, (x1, y), (x2, y), color, 1)
-        else:
-            for x in range(x1, x2):
-                t = (x - x1) / max(1, (x2 - x1))
-                color = tuple(int(c1 * (1 - t) + c2 * t) for c1, c2 in zip(color1, color2))
-                cv2.line(img, (x, y1), (x, y2), color, 1)
-
-    def draw_header(self, img, app):
-        """Desenha header premium com gradiente e blur."""
-        h = self.header_height
-
-        # Gradiente de fundo
-        self.draw_gradient_rect(img, (0, 0), (self.width, h),
-                                (35, 30, 25), (25, 22, 18), vertical=True)
-
-        # Linha de accent inferior
-        cv2.line(img, (0, h - 2), (self.width, h - 2), self.c['accent'], 2)
-
-        # Logo com glow
-        logo_text = "USG FLOW VISION"
-        cv2.putText(img, logo_text, (20, 38),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.c['accent'], 2, cv2.LINE_AA)
-
-        # Versao
-        cv2.putText(img, "v2.0", (230, 38),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.c['text_muted'], 1, cv2.LINE_AA)
-
-        # Modo atual - Pill badge
-        mode_name = app.current_mode[0]
-        mode_color = app.current_mode[2]
-
-        pill_x = 300
-        pill_w = len(mode_name) * 12 + 30
-        self.draw_rounded_rect(img, (pill_x, 15), (pill_x + pill_w, 42),
-                               mode_color, radius=14)
-        cv2.putText(img, mode_name, (pill_x + 15, 34),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2, cv2.LINE_AA)
-
-        # Status indicators no centro
-        center_x = self.width // 2 - 150
-
-        # Freeze indicator
-        if app.freeze:
-            self.draw_status_badge(img, center_x, 15, "CONGELADO", self.c['warning'], pulse=True)
-            center_x += 130
-
-        # Recording indicator
-        if app.recording:
-            elapsed = int(time.time() - app.record_start) if app.record_start else 0
-            mins, secs = divmod(elapsed, 60)
-            rec_text = f"REC {mins:02d}:{secs:02d}"
-            self.draw_status_badge(img, center_x, 15, rec_text, self.c['danger'], pulse=True, dot=True)
-            center_x += 140
-
-        # AI indicator
-        if app.ai_enabled:
-            self.draw_status_badge(img, center_x, 15, "IA ATIVA", self.c['success'])
-
-        # FPS e metricas no canto direito
-        fps_x = self.width - 200
-
-        # FPS com indicador de cor
-        fps_color = self.c['success'] if app.fps >= 25 else self.c['warning'] if app.fps >= 15 else self.c['danger']
-        cv2.putText(img, f"{app.fps}", (fps_x, 32),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, fps_color, 2, cv2.LINE_AA)
-        cv2.putText(img, "FPS", (fps_x + 35, 32),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.c['text_muted'], 1, cv2.LINE_AA)
-
-        # Resolucao
-        if app.frame is not None:
-            h_frame, w_frame = app.frame.shape[:2]
-            res_text = f"{w_frame}x{h_frame}"
-            cv2.putText(img, res_text, (fps_x + 80, 32),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.c['text_dim'], 1, cv2.LINE_AA)
-
-    def draw_status_badge(self, img, x, y, text, color, pulse=False, dot=False):
-        """Desenha badge de status premium."""
-        w = len(text) * 10 + 25
-        h = 27
-
-        # Pulse effect
-        alpha = 1.0
-        if pulse:
-            self.pulse_phase += 0.1
-            alpha = 0.7 + 0.3 * math.sin(self.pulse_phase)
-
-        # Background com alpha
-        bg_color = tuple(int(c * 0.3) for c in color)
-        self.draw_rounded_rect(img, (x, y), (x + w, y + h), bg_color, radius=14)
-
-        # Borda
-        border_color = tuple(int(c * alpha) for c in color)
-        self.draw_rounded_rect(img, (x, y), (x + w, y + h), border_color, radius=14, thickness=1)
-
-        # Dot pulsante
-        text_x = x + 10
-        if dot:
-            if int(time.time() * 3) % 2:
-                cv2.circle(img, (x + 12, y + h // 2), 5, color, -1)
-            text_x = x + 22
-
-        # Texto
-        cv2.putText(img, text, (text_x, y + 19),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
-
-    def draw_sidebar(self, img, app):
-        """Desenha sidebar premium com sombra e blur."""
-        x = self.width - self.sidebar_width
-        y = self.header_height
-
-        # Sombra
-        for i in range(10):
-            alpha = 0.02 * (10 - i)
-            shadow_color = tuple(int(c * alpha) for c in (0, 0, 0))
-            cv2.line(img, (x - i, y), (x - i, self.height), shadow_color, 1)
-
-        # Background
-        self.draw_rounded_rect(img, (x, y), (self.width, self.height),
-                               self.c['surface'], radius=0)
-
-        # Borda esquerda com gradiente
-        for i in range(2):
-            cv2.line(img, (x + i, y), (x + i, self.height),
-                     tuple(int(c * (1 - i * 0.5)) for c in self.c['accent']), 1)
-
-        # === SECAO MODOS ===
-        self.draw_section_title(img, x + 20, y + 30, "MODOS DE IMAGEM")
-
-        btn_y = y + 55
-        for i, (name, key, color) in enumerate(app.modes):
-            is_selected = (i == app.mode_idx)
-            self.draw_mode_button(img, x + 15, btn_y, self.sidebar_width - 30, 40,
-                                  name, f"[{i+1}]", color, is_selected)
-            btn_y += 48
-
-        # === SECAO CONTROLES ===
-        btn_y += 15
-        self.draw_section_title(img, x + 20, btn_y, "CONTROLES")
-        btn_y += 25
-
-        controls = [
-            ("Congelar", "F", app.freeze, self.c['warning']),
-            ("Gravar", "R", app.recording, self.c['danger']),
-            ("IA", "A", app.ai_enabled, self.c['success']),
-            ("Screenshot", "S", False, self.c['info']),
-        ]
-
-        for label, key, active, color in controls:
-            self.draw_control_item(img, x + 15, btn_y, self.sidebar_width - 30,
-                                   label, key, active, color)
-            btn_y += 38
-
-        # === SECAO ATALHOS ===
-        btn_y += 15
-        self.draw_section_title(img, x + 20, btn_y, "ATALHOS")
-        btn_y += 25
-
-        shortcuts = [
-            ("Ajuda", "H"),
-            ("Camera", "C"),
-            ("Sidebar", "T"),
-            ("Sair", "Q"),
-        ]
-
-        for label, key in shortcuts:
-            cv2.putText(img, f"[{key}]", (x + 20, btn_y + 12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.c['accent'], 1, cv2.LINE_AA)
-            cv2.putText(img, label, (x + 55, btn_y + 12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.c['text_dim'], 1, cv2.LINE_AA)
-            btn_y += 28
-
-        # === RODAPE ===
-        footer_y = self.height - 80
-        cv2.line(img, (x + 20, footer_y), (self.width - 20, footer_y),
-                 self.c['border'], 1)
-
-        # Logo pequeno
-        cv2.putText(img, "USG FLOW VISION", (x + 20, footer_y + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.c['text_muted'], 1, cv2.LINE_AA)
-        cv2.putText(img, "Zero Conversao", (x + 20, footer_y + 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, self.c['accent'], 1, cv2.LINE_AA)
-
-    def draw_section_title(self, img, x, y, text):
-        """Desenha titulo de secao."""
-        cv2.putText(img, text, (x, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.c['text_muted'], 1, cv2.LINE_AA)
-        # Linha decorativa
-        text_w = len(text) * 8
-        cv2.line(img, (x + text_w + 10, y - 5), (x + self.sidebar_width - 50, y - 5),
-                 self.c['border'], 1)
-
-    def draw_mode_button(self, img, x, y, w, h, text, shortcut, color, selected):
-        """Desenha botao de modo premium."""
-        if selected:
-            # Fundo colorido
-            self.draw_rounded_rect(img, (x, y), (x + w, y + h), color, radius=10)
-            # Glow effect
-            for i in range(3):
-                glow_color = tuple(int(c * 0.3 / (i + 1)) for c in color)
-                self.draw_rounded_rect(img, (x - i, y - i), (x + w + i, y + h + i),
-                                       glow_color, radius=10 + i, thickness=1)
-            text_color = (0, 0, 0)
-        else:
-            # Fundo transparente com borda
-            self.draw_rounded_rect(img, (x, y), (x + w, y + h),
-                                   self.c['surface2'], radius=10)
-            self.draw_rounded_rect(img, (x, y), (x + w, y + h),
-                                   self.c['border'], radius=10, thickness=1)
-            text_color = self.c['text_dim']
-
-        # Texto
-        cv2.putText(img, text, (x + 15, y + h // 2 + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1, cv2.LINE_AA)
-
-        # Shortcut
-        cv2.putText(img, shortcut, (x + w - 35, y + h // 2 + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, text_color, 1, cv2.LINE_AA)
-
-    def draw_control_item(self, img, x, y, w, label, key, active, color):
-        """Desenha item de controle."""
-        h = 32
-
-        # Toggle switch
-        switch_x = x + w - 50
-        switch_w = 44
-        switch_h = 22
-
-        if active:
-            # Switch ativo
-            self.draw_rounded_rect(img, (switch_x, y + 5), (switch_x + switch_w, y + 5 + switch_h),
-                                   color, radius=11)
-            # Knob
-            cv2.circle(img, (switch_x + switch_w - 11, y + 5 + switch_h // 2), 8,
-                       (255, 255, 255), -1)
-        else:
-            # Switch inativo
-            self.draw_rounded_rect(img, (switch_x, y + 5), (switch_x + switch_w, y + 5 + switch_h),
-                                   self.c['surface2'], radius=11)
-            self.draw_rounded_rect(img, (switch_x, y + 5), (switch_x + switch_w, y + 5 + switch_h),
-                                   self.c['border'], radius=11, thickness=1)
-            # Knob
-            cv2.circle(img, (switch_x + 11, y + 5 + switch_h // 2), 8,
-                       self.c['text_muted'], -1)
-
-        # Key badge
-        cv2.putText(img, f"[{key}]", (x, y + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.c['accent'], 1, cv2.LINE_AA)
-
-        # Label
-        label_color = color if active else self.c['text_dim']
-        cv2.putText(img, label, (x + 35, y + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 1, cv2.LINE_AA)
-
-    def draw_image_area(self, img, frame, app):
-        """Desenha area principal da imagem SEM PERDA DE QUALIDADE."""
-        if app.show_sidebar:
-            area_w = self.width - self.sidebar_width - self.padding
-        else:
-            area_w = self.width - self.padding
-
-        area_h = self.height - self.header_height - self.footer_height - self.padding
-        area_x = self.padding // 2
-        area_y = self.header_height + self.padding // 2
-
-        if frame is None:
-            self.draw_waiting_screen(img, area_x, area_y, area_w, area_h)
-        else:
-            # USAR FRAME ORIGINAL - SEM RESIZE para manter qualidade
-            processed = frame.copy()
-
-            # Aplicar IA se ativada
-            if app.ai_enabled and app.ai:
-                try:
-                    processed = app.ai.process(processed)
-                except:
-                    pass
-
-            fh, fw = processed.shape[:2]
-
-            # Calcular posicao para centralizar (sem resize)
-            # Se imagem maior que area, faz crop centralizado
-            # Se menor, centraliza com padding
-
-            if fw <= area_w and fh <= area_h:
-                # Imagem cabe - centralizar sem resize
-                x_offset = area_x + (area_w - fw) // 2
-                y_offset = area_y + (area_h - fh) // 2
-                display_w, display_h = fw, fh
-                display_frame = processed
-            else:
-                # Imagem maior - fazer resize APENAS se necessario
-                scale = min(area_w / fw, area_h / fh)
-                display_w = int(fw * scale)
-                display_h = int(fh * scale)
-                x_offset = area_x + (area_w - display_w) // 2
-                y_offset = area_y + (area_h - display_h) // 2
-                # Usar INTER_LANCZOS4 para melhor qualidade
-                display_frame = cv2.resize(processed, (display_w, display_h),
-                                          interpolation=cv2.INTER_LANCZOS4)
-
-            # Borda
-            cv2.rectangle(img, (x_offset - 2, y_offset - 2),
-                          (x_offset + display_w + 2, y_offset + display_h + 2),
-                          self.c['border'], 2)
-
-            # Colocar imagem
-            img[y_offset:y_offset + display_h, x_offset:x_offset + display_w] = display_frame
-
-            # Overlay
-            self.draw_image_overlay(img, x_offset, y_offset, display_w, display_h, fw, fh, app)
-
-    def draw_waiting_screen(self, img, x, y, w, h):
-        """Desenha tela de espera animada."""
-        # Fundo com grid sutil
-        for i in range(0, w, 50):
-            cv2.line(img, (x + i, y), (x + i, y + h), self.c['surface'], 1)
-        for i in range(0, h, 50):
-            cv2.line(img, (x, y + i), (x + w, y + i), self.c['surface'], 1)
-
-        # Circulo central animado
-        center_x = x + w // 2
-        center_y = y + h // 2
-
-        # Arcos animados
-        t = time.time()
-        for i in range(3):
-            angle = int((t * 60 + i * 120) % 360)
-            color = tuple(int(c * (1 - i * 0.2)) for c in self.c['accent'])
-            cv2.ellipse(img, (center_x, center_y), (60 + i * 20, 60 + i * 20),
-                        angle, 0, 60, color, 3)
-
-        # Texto central
-        msg = "AGUARDANDO SINAL"
-        text_size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
-        tx = center_x - text_size[0] // 2
-        ty = center_y + 100
-        cv2.putText(img, msg, (tx, ty),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, self.c['text_dim'], 2, cv2.LINE_AA)
-
-        # Instrucoes
-        instructions = [
-            "Para conectar o iPhone:",
-            "1. Abra QuickTime Player",
-            "2. Arquivo > Nova Gravacao de Filme",
-            "3. Selecione seu iPhone como fonte",
-            "",
-            "Ou use Espelhamento do macOS Sequoia"
-        ]
-
-        ty += 50
-        for line in instructions:
-            text_size = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
-            tx = center_x - text_size[0] // 2
-            color = self.c['accent'] if "1." in line or "2." in line or "3." in line else self.c['text_muted']
-            cv2.putText(img, line, (tx, ty),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
-            ty += 25
-
-    def draw_image_overlay(self, img, x, y, w, h, orig_w, orig_h, app):
-        """Desenha overlay de informacoes sobre a imagem."""
-        # Badge de resolucao no canto superior esquerdo
-        res_text = f"{orig_w}x{orig_h}"
-        badge_w = len(res_text) * 8 + 16
-        badge_h = 22
-
-        # Fundo semi-transparente
-        overlay = img.copy()
-        cv2.rectangle(overlay, (x + 8, y + 8), (x + 8 + badge_w, y + 8 + badge_h),
-                      (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
-
-        cv2.putText(img, res_text, (x + 16, y + 23),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.c['text'], 1, cv2.LINE_AA)
-
-        # Timestamp no canto inferior direito
-        timestamp = time.strftime("%H:%M:%S")
-        ts_w = len(timestamp) * 10 + 16
-
-        overlay = img.copy()
-        cv2.rectangle(overlay, (x + w - ts_w - 8, y + h - 30),
-                      (x + w - 8, y + h - 8), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
-
-        cv2.putText(img, timestamp, (x + w - ts_w, y + h - 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.c['text'], 1, cv2.LINE_AA)
-
-    def draw_footer(self, img, app):
-        """Desenha footer com informacoes."""
-        y = self.height - self.footer_height
-
-        # Background
-        cv2.rectangle(img, (0, y), (self.width, self.height), self.c['surface'], -1)
-
-        # Linha superior
-        cv2.line(img, (0, y), (self.width, y), self.c['border'], 1)
-
-        # Status da conexao
-        if app.frame is not None:
-            status = "CONECTADO"
-            status_color = self.c['success']
-        else:
-            status = "DESCONECTADO"
-            status_color = self.c['danger']
-
-        cv2.circle(img, (20, y + self.footer_height // 2), 5, status_color, -1)
-        cv2.putText(img, status, (35, y + self.footer_height // 2 + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, status_color, 1, cv2.LINE_AA)
-
-        # Fonte de video
-        source_text = f"Fonte: {config.VIDEO_SOURCE}"
-        cv2.putText(img, source_text, (160, y + self.footer_height // 2 + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.c['text_muted'], 1, cv2.LINE_AA)
-
-        # Hora
-        current_time = time.strftime("%H:%M:%S")
-        cv2.putText(img, current_time, (self.width - 100, y + self.footer_height // 2 + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.c['text_dim'], 1, cv2.LINE_AA)
-
-    def draw_help_modal(self, img):
-        """Desenha modal de ajuda premium."""
-        # Overlay escuro
-        overlay = img.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.8, img, 0.2, 0, img)
-
-        # Modal
-        modal_w = 600
-        modal_h = 500
-        mx = (self.width - modal_w) // 2
-        my = (self.height - modal_h) // 2
-
-        # Sombra do modal
-        for i in range(20):
-            alpha = 0.03 * (20 - i)
-            shadow_color = tuple(int(30 * alpha) for _ in range(3))
-            self.draw_rounded_rect(img, (mx - i, my - i), (mx + modal_w + i, my + modal_h + i),
-                                   shadow_color, radius=20 + i)
-
-        # Background do modal
-        self.draw_rounded_rect(img, (mx, my), (mx + modal_w, my + modal_h),
-                               self.c['surface'], radius=20)
-        self.draw_rounded_rect(img, (mx, my), (mx + modal_w, my + modal_h),
-                               self.c['accent'], radius=20, thickness=2)
-
-        # Titulo
-        title = "AJUDA - CONTROLES"
-        cv2.putText(img, title, (mx + 30, my + 45),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.c['accent'], 2, cv2.LINE_AA)
-
-        # Linha decorativa
-        cv2.line(img, (mx + 30, my + 60), (mx + modal_w - 30, my + 60),
-                 self.c['border'], 1)
-
-        # Comandos
-        commands = [
-            ("1-6", "Selecionar modo diretamente"),
-            ("M", "Proximo modo"),
-            ("F", "Congelar / Descongelar imagem"),
-            ("R", "Iniciar / Parar gravacao"),
-            ("S", "Salvar screenshot (PNG lossless)"),
-            ("A", "Ligar / Desligar IA"),
-            ("C", "Trocar camera / fonte"),
-            ("T", "Mostrar / Esconder sidebar"),
-            ("H", "Mostrar / Esconder esta ajuda"),
-            ("Q / ESC", "Sair do aplicativo"),
-        ]
-
-        cy = my + 100
-        for key, desc in commands:
-            # Key badge
-            key_w = len(key) * 12 + 20
-            self.draw_rounded_rect(img, (mx + 40, cy - 15), (mx + 40 + key_w, cy + 10),
-                                   self.c['surface2'], radius=6)
-            cv2.putText(img, key, (mx + 50, cy + 3),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.c['accent'], 1, cv2.LINE_AA)
-
-            # Descricao
-            cv2.putText(img, desc, (mx + 130, cy + 3),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.c['text'], 1, cv2.LINE_AA)
-
-            cy += 38
-
-        # Rodape
-        footer = "Pressione H para fechar"
-        text_size = cv2.getTextSize(footer, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
-        cv2.putText(img, footer, (mx + (modal_w - text_size[0]) // 2, my + modal_h - 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.c['text_muted'], 1, cv2.LINE_AA)
-
-    def render(self, app):
-        """Renderiza interface completa."""
-        # Canvas base
-        img = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-        img[:] = self.c['bg']
-
-        # Componentes
-        self.draw_header(img, app)
-        self.draw_image_area(img, app.frame, app)
-
-        if app.show_sidebar:
-            self.draw_sidebar(img, app)
-
-        self.draw_footer(img, app)
-
-        if app.show_help:
-            self.draw_help_modal(img)
-
-        return img
-
-
-class USGFinal:
-    """Aplicativo principal."""
-
+# =============================================================================
+# CAPTURA EM THREAD SEPARADO
+# =============================================================================
+class CapturaThread(threading.Thread):
     def __init__(self):
-        self.print_banner()
-
-        self.running = True
-        self.freeze = False
-        self.recording = False
-        self.show_help = False
-        self.ai_enabled = False
-        self.show_sidebar = True
-
-        # Modos (nome, key_ia, cor_bgr)
-        self.modes = [
-            ('B-MODE', None, (180, 180, 180)),
-            ('AGULHA', 'needle', (100, 255, 100)),
-            ('NERVO', 'nerve', (0, 255, 255)),
-            ('CARDIACO', 'cardiac', (100, 100, 255)),
-            ('FAST', 'fast', (0, 165, 255)),
-            ('PULMAO', 'lung', (0, 200, 255)),
-        ]
-        self.mode_idx = 0
-        self.current_mode = self.modes[0]
-
-        # Captura
-        print("\n[1/3] Iniciando captura...")
-        self.cap = None
-        self.init_capture()
-
-        # IA
-        print("[2/3] Carregando IA...")
-        try:
-            from src.ai_processor import AIProcessor
-            self.ai = AIProcessor()
-        except Exception as e:
-            print(f"      IA nao disponivel: {e}")
-            self.ai = None
-
-        # Gravacao
-        print("[3/3] Inicializando...")
-        self.video_writer = None
-        self.record_path = None
-        self.record_start = None
-
-        # Frame
+        super().__init__(daemon=True)
         self.frame = None
-        self.fps = 0
-        self.frame_count = 0
-        self.fps_time = time.time()
-
-        # UI
-        self.window_width = 1500
-        self.window_height = 900
-        self.ui = PremiumUI(self.window_width, self.window_height)
-
-        # Janela
-        cv2.namedWindow(config.WINDOW_NAME, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(config.WINDOW_NAME, self.window_width, self.window_height)
-
-        # Callback de mouse para cliques
-        cv2.setMouseCallback(config.WINDOW_NAME, self.mouse_callback)
-
-        # Areas clicaveis (serao calculadas pelo UI)
-        self.click_areas = []
-
-        print("\n" + "=" * 60)
-        print("  PRONTO! Use H para ajuda ou clique nos botoes")
-        print("=" * 60 + "\n")
-
-    def print_banner(self):
-        banner = """
-╔══════════════════════════════════════════════════════════════╗
-║                                                              ║
-║   ██╗   ██╗███████╗ ██████╗     ███████╗██╗      ██████╗     ║
-║   ██║   ██║██╔════╝██╔════╝     ██╔════╝██║     ██╔═══██╗    ║
-║   ██║   ██║███████╗██║  ███╗    █████╗  ██║     ██║   ██║    ║
-║   ██║   ██║╚════██║██║   ██║    ██╔══╝  ██║     ██║   ██║    ║
-║   ╚██████╔╝███████║╚██████╔╝    ██║     ███████╗╚██████╔╝    ║
-║    ╚═════╝ ╚══════╝ ╚═════╝     ╚═╝     ╚══════╝ ╚═════╝     ║
-║                                                              ║
-║              APLICATIVO USG FINAL                            ║
-║              100% Python - Zero Conversao                    ║
-║              Pixels Perfeitos                                ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
-        """
-        print(banner)
-
-    def init_capture(self):
-        try:
-            self.cap = VideoCapture(config.VIDEO_SOURCE)
-            ret, frame = self.cap.read()
-            if ret and frame is not None:
-                print(f"      Fonte: {config.VIDEO_SOURCE} - OK")
-                return True
-        except Exception as e:
-            print(f"      Erro: {e}")
-
-        if config.VIDEO_SOURCE == "AIRPLAY":
-            print("\n" + "!" * 60)
-            print("  AIRPLAY NAO ENCONTRADO")
-            print("  ")
-            print("  Abra o QuickTime e conecte o iPhone")
-            print("!" * 60 + "\n")
-
-        return False
-
-    def screenshot(self):
-        if self.frame is None:
-            return
-        if not os.path.exists("captures"):
-            os.makedirs("captures")
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        path = f"captures/screenshot_{ts}.png"
-        cv2.imwrite(path, self.frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-        print(f"Screenshot: {path}")
-
-    def start_recording(self):
-        if self.frame is None:
-            return
-        if not os.path.exists("captures"):
-            os.makedirs("captures")
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        self.record_path = f"captures/video_{ts}.avi"
-        h, w = self.frame.shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-        self.video_writer = cv2.VideoWriter(self.record_path, fourcc, 30, (w, h))
-        self.record_start = time.time()
-        self.recording = True
-        print(f"Gravando: {self.record_path}")
-
-    def stop_recording(self):
-        if self.video_writer:
-            self.video_writer.release()
-            self.video_writer = None
-            elapsed = int(time.time() - self.record_start) if self.record_start else 0
-            print(f"Gravacao salva ({elapsed}s): {self.record_path}")
-        self.recording = False
-        self.record_start = None
-
-    def set_mode(self, idx):
-        if 0 <= idx < len(self.modes):
-            self.mode_idx = idx
-            self.current_mode = self.modes[idx]
-            name, key, _ = self.current_mode
-            if self.ai and key:
-                self.ai.set_mode(key)
-            elif self.ai:
-                self.ai.set_mode(None)
-            print(f"Modo: {name}")
-
-    def next_mode(self):
-        self.set_mode((self.mode_idx + 1) % len(self.modes))
-
-    def next_camera(self):
-        if self.cap:
-            self.cap.release()
-        sources = ["AIRPLAY", 0, 1, 2]
-        try:
-            idx = sources.index(config.VIDEO_SOURCE)
-        except:
-            idx = 0
-        config.VIDEO_SOURCE = sources[(idx + 1) % len(sources)]
-        print(f"Camera: {config.VIDEO_SOURCE}")
-        self.cap = VideoCapture(config.VIDEO_SOURCE)
-
-    def mouse_callback(self, event, x, y, flags, param):
-        """Callback para cliques do mouse."""
-        if event == cv2.EVENT_LBUTTONDOWN:
-            # Verificar clique nos botoes de modo
-            sidebar_x = self.window_width - self.ui.sidebar_width
-            btn_y = self.ui.header_height + 55
-
-            for i in range(len(self.modes)):
-                btn_x1 = sidebar_x + 15
-                btn_x2 = sidebar_x + self.ui.sidebar_width - 15
-                btn_y1 = btn_y
-                btn_y2 = btn_y + 40
-
-                if btn_x1 <= x <= btn_x2 and btn_y1 <= y <= btn_y2:
-                    self.set_mode(i)
-                    return
-
-                btn_y += 48
-
-            # Verificar clique nos controles
-            ctrl_y = btn_y + 40  # Depois da secao de modos
-
-            # Congelar
-            if sidebar_x + 15 <= x <= sidebar_x + self.ui.sidebar_width - 15:
-                if ctrl_y <= y <= ctrl_y + 32:
-                    self.freeze = not self.freeze
-                    return
-                ctrl_y += 38
-
-                # Gravar
-                if ctrl_y <= y <= ctrl_y + 32:
-                    if self.recording:
-                        self.stop_recording()
-                    else:
-                        self.start_recording()
-                    return
-                ctrl_y += 38
-
-                # IA
-                if ctrl_y <= y <= ctrl_y + 32:
-                    self.ai_enabled = not self.ai_enabled
-                    print(f"IA: {'ON' if self.ai_enabled else 'OFF'}")
-                    return
-                ctrl_y += 38
-
-                # Screenshot
-                if ctrl_y <= y <= ctrl_y + 32:
-                    self.screenshot()
-                    return
+        self.lock = threading.Lock()
+        self.running = True
+        self.connected = False
 
     def run(self):
+        cap = WindowCapture("AIRPLAY")
+        while self.running:
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                with self.lock:
+                    self.frame = frame
+                    self.connected = True
+            else:
+                self.connected = False
+                time.sleep(0.02)
+
+    def get_frame(self):
+        with self.lock:
+            return self.frame.copy() if self.frame is not None else None
+
+    def stop(self):
+        self.running = False
+
+
+# =============================================================================
+# CLASSE BOTAO
+# =============================================================================
+class Botao:
+    def __init__(self, x, y, w, h, texto, tecla, cor_normal, cor_ativo, tooltip=""):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.texto = texto
+        self.tecla = tecla
+        self.cor_normal = cor_normal
+        self.cor_ativo = cor_ativo
+        self.tooltip = tooltip
+        self.ativo = False
+        self.hover = False
+
+    def contem(self, px, py):
+        return self.x <= px <= self.x + self.w and self.y <= py <= self.y + self.h
+
+    def desenhar(self, img):
+        if self.ativo:
+            cor_bg = self.cor_ativo
+            cor_texto = (0, 0, 0)
+        elif self.hover:
+            cor_bg = tuple(min(c + 25, 255) for c in self.cor_normal)
+            cor_texto = (220, 220, 220)
+        else:
+            cor_bg = self.cor_normal
+            cor_texto = (180, 180, 180)
+
+        cv2.rectangle(img, (self.x, self.y), (self.x + self.w, self.y + self.h), cor_bg, -1)
+        cv2.rectangle(img, (self.x, self.y), (self.x + self.w, self.y + self.h), (50, 50, 60), 1)
+
+        label = f"[{self.tecla}] {self.texto}" if self.tecla else self.texto
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+        tx = self.x + (self.w - tw) // 2
+        ty = self.y + (self.h + th) // 2
+        cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.38, cor_texto, 1, cv2.LINE_AA)
+
+
+# =============================================================================
+# INSTRUCOES POR MODO
+# =============================================================================
+MODE_INSTRUCTIONS = {
+    'B-MODE': "Imagem 2D padrao para avaliacao anatomica geral em escala de cinza.",
+    'AGULHA': "Realce de agulha por IA com projecao de trajetoria para puncoes guiadas.",
+    'NERVO': "Segmentacao automatica de nervos perifericos e estruturas adjacentes.",
+    'CARDIACO': "Calculo automatico de Fracao de Ejecao (Simpson) e visualizacao de camaras.",
+    'FAST': "Deteccao rapida de liquido livre abdominal e pelvico para trauma.",
+    'ANATOMIA': "Identificacao e rotulagem de estruturas anatomicas em tempo real.",
+    'MODO-M': "Analise temporal de movimento (ex: pleura, valvulas cardiacas).",
+    'COLOR': "Mapeamento de fluxo sanguineo direcional (Vermelho/Azul).",
+    'POWER': "Alta sensibilidade para fluxos lentos/perifericos (Angio).",
+    'PULMAO': "Quantificacao automatica de Linhas-B e sinal de deslizamento pleural.",
+    'BEXIGA': "Calculo automatizado do volume da bexiga com correcao geometrica.",
+}
+
+
+# =============================================================================
+# APLICATIVO PRINCIPAL
+# =============================================================================
+class USGApp:
+    """
+    Interface Premium Completa.
+    Baseada no projeto HTML PlataformaUSG.
+    """
+
+    # Todos os modos disponiveis (igual ao HTML)
+    MODOS = [
+        ('B-MODE', '1', (180, 180, 180), "Modo Brilho - Imagem 2D padrao"),
+        ('AGULHA', '2', (100, 255, 100), "Needle Pilot - Realce de agulha"),
+        ('NERVO', '3', (0, 255, 255), "Nerve Track - Segmentacao nervos"),
+        ('CARDIACO', '4', (100, 100, 255), "Cardiac AI - Fracao Ejecao"),
+        ('FAST', '5', (0, 165, 255), "Protocolo FAST - Trauma"),
+        ('ANATOMIA', '6', (255, 100, 255), "Anatomia - ID estruturas"),
+        ('MODO-M', '7', (200, 200, 100), "Modo-M - Movimento temporal"),
+        ('COLOR', '8', (255, 50, 50), "Color Doppler - Fluxo"),
+        ('POWER', '9', (255, 150, 50), "Power Doppler - Alta sens."),
+        ('PULMAO', '0', (100, 200, 255), "Lung AI - Linhas-B"),
+        ('BEXIGA', 'V', (150, 100, 255), "Volume Vesical"),
+    ]
+
+    SIDEBAR_W = 200
+
+    def __init__(self):
+        # Estado
+        self.modo_idx = 0
+        self.pause = False
+        self.ai_on = False
+        self.recording = False
+        self.show_sidebar = True
+        self.show_overlays = True
+        self.show_help = False
+        self.show_instructions = True
+        self.fullscreen = False
+        self.biplane_active = False
+        self.biplane_ref = None
+        self.running = True
+        self.fps = 0
+        self.mouse_x = 0
+        self.mouse_y = 0
+
+        # Zoom/Pan
+        self.zoom_level = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+
+        # AI
+        self.ai = None
+
+        # Gravacao
+        self.recorder = ClipRecorder(output_dir="captures", fps=30)
+
+        # Captura
+        self.captura = CapturaThread()
+        self.captura.start()
+        self.frame_original = None
+
+        # Janela
+        self.janela = "USG FLOW"
+        cv2.namedWindow(self.janela, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.janela, 1700, 950)
+        cv2.setMouseCallback(self.janela, self._mouse_callback)
+
+        # Criar botoes
+        self._criar_botoes()
+
+        self._print_ajuda()
+
+    def _print_ajuda(self):
+        print("\n" + "=" * 60)
+        print("  USG FLOW - Interface Premium Completa")
+        print("=" * 60)
+        print("  MODOS (11 disponiveis):")
+        for nome, tecla, _, desc in self.MODOS:
+            print(f"    [{tecla}] {nome}: {desc}")
+        print("-" * 60)
+        print("  CONTROLES:")
+        print("    F       = Pause/Congelar")
+        print("    A       = AI On/Off")
+        print("    R       = Gravar")
+        print("    S       = Screenshot")
+        print("    B       = Biplane (lado a lado)")
+        print("    H       = Esconder/Mostrar overlays")
+        print("    I       = Esconder/Mostrar instrucoes")
+        print("    T       = Esconder/Mostrar sidebar")
+        print("    +/-     = Zoom In/Out")
+        print("    Setas   = Pan (mover imagem)")
+        print("    0       = Reset View")
+        print("    ?       = Ajuda")
+        print("    F11     = Fullscreen")
+        print("    Q/ESC   = Sair")
+        print("=" * 60 + "\n")
+
+    def _criar_botoes(self):
+        """Cria todos os botoes da sidebar."""
+        self.botoes_modo = []
+        self.botoes_ctrl = []
+        self.botoes_view = []
+
+        bg_btn = (40, 40, 48)
+
+        # Botoes de MODO
+        y = 55
+        for i, (nome, tecla, cor, tooltip) in enumerate(self.MODOS):
+            btn = Botao(10, y, 180, 26, nome, tecla, bg_btn, cor, tooltip)
+            self.botoes_modo.append(btn)
+            y += 30
+
+        # Separador - Controles
+        y += 15
+
+        # Botoes de CONTROLE
+        controles = [
+            ('Freeze', 'F', (0, 200, 255), "Congelar imagem"),
+            ('AI', 'A', (100, 255, 100), "Ativar processamento IA"),
+            ('Gravar', 'R', (80, 80, 255), "Iniciar/parar gravacao"),
+            ('Foto', 'S', (255, 165, 0), "Salvar screenshot"),
+            ('Biplane', 'B', (200, 100, 200), "Modo lado a lado"),
+        ]
+        for texto, tecla, cor, tooltip in controles:
+            btn = Botao(10, y, 180, 26, texto, tecla, bg_btn, cor, tooltip)
+            self.botoes_ctrl.append(btn)
+            y += 30
+
+        # Separador - View
+        y += 15
+
+        # Botoes de VIEW
+        view_btns = [
+            ('Zoom +', '+', (100, 150, 200), "Aumentar zoom"),
+            ('Zoom -', '-', (100, 150, 200), "Diminuir zoom"),
+            ('Reset', '0', (150, 150, 150), "Resetar visualizacao"),
+            ('Overlays', 'H', (120, 120, 140), "Mostrar/esconder overlays"),
+            ('Sidebar', 'T', (120, 120, 140), "Mostrar/esconder sidebar"),
+            ('Ajuda', '?', (100, 150, 255), "Mostrar atalhos"),
+        ]
+        for texto, tecla, cor, tooltip in view_btns:
+            btn = Botao(10, y, 88 if texto.startswith('Zoom') else 180, 24, texto, tecla, bg_btn, cor, tooltip)
+            if texto == 'Zoom +':
+                btn.w = 88
+            elif texto == 'Zoom -':
+                btn.x = 102
+                btn.w = 88
+                y -= 28  # Mesma linha
+            self.botoes_view.append(btn)
+            y += 28
+
+    def _mouse_callback(self, event, x, y, flags, param):
+        self.mouse_x = x
+        self.mouse_y = y
+
+        # Atualizar hover
+        for btn in self.botoes_modo + self.botoes_ctrl + self.botoes_view:
+            btn.hover = btn.contem(x, y)
+
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+
+        if not self.show_sidebar:
+            return
+
+        # Cliques nos botoes de modo
+        for i, btn in enumerate(self.botoes_modo):
+            if btn.contem(x, y):
+                self._set_modo(i)
+                return
+
+        # Cliques nos botoes de controle
+        for i, btn in enumerate(self.botoes_ctrl):
+            if btn.contem(x, y):
+                if i == 0:
+                    self._toggle_pause()
+                elif i == 1:
+                    self._toggle_ai()
+                elif i == 2:
+                    self._toggle_recording()
+                elif i == 3:
+                    self._screenshot()
+                elif i == 4:
+                    self._toggle_biplane()
+                return
+
+        # Cliques nos botoes de view
+        for i, btn in enumerate(self.botoes_view):
+            if btn.contem(x, y):
+                if btn.texto == 'Zoom +':
+                    self._zoom_in()
+                elif btn.texto == 'Zoom -':
+                    self._zoom_out()
+                elif btn.texto == 'Reset':
+                    self._reset_view()
+                elif btn.texto == 'Overlays':
+                    self._toggle_overlays()
+                elif btn.texto == 'Sidebar':
+                    self._toggle_sidebar()
+                elif btn.texto == 'Ajuda':
+                    self.show_help = not self.show_help
+                return
+
+    def _set_modo(self, idx):
+        if 0 <= idx < len(self.MODOS):
+            self.modo_idx = idx
+            nome = self.MODOS[idx][0]
+            print(f"Modo: {nome}")
+            if self.ai:
+                mode_map = {
+                    0: None, 1: 'needle', 2: 'nerve', 3: 'cardiac',
+                    4: 'fast', 5: 'segment', 6: 'm_mode', 7: 'color',
+                    8: 'power', 9: 'b_lines', 10: 'bladder'
+                }
+                self.ai.set_mode(mode_map.get(idx))
+
+    def _toggle_pause(self):
+        self.pause = not self.pause
+        print(f"Pause: {'ON' if self.pause else 'OFF'}")
+
+    def _toggle_ai(self):
+        self.ai_on = not self.ai_on
+        if self.ai_on and self.ai is None:
+            try:
+                from src.ai_processor import AIProcessor
+                self.ai = AIProcessor()
+            except Exception as e:
+                print(f"Erro AI: {e}")
+                self.ai_on = False
+        print(f"AI: {'ON' if self.ai_on else 'OFF'}")
+
+    def _toggle_recording(self):
+        self.recording = not self.recording
+        if self.recording:
+            self.recorder.start_recording()
+        else:
+            self.recorder.stop_recording()
+        print(f"Gravacao: {'ON' if self.recording else 'OFF'}")
+
+    def _screenshot(self):
+        if self.frame_original is not None:
+            os.makedirs("captures", exist_ok=True)
+            path = f"captures/usg_{time.strftime('%Y%m%d_%H%M%S')}.png"
+            cv2.imwrite(path, self.frame_original, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+            print(f"Foto salva: {path}")
+
+    def _toggle_biplane(self):
+        if not self.biplane_active:
+            if self.frame_original is not None:
+                self.biplane_ref = self.frame_original.copy()
+                self.biplane_active = True
+                print("Biplane: ON (referencia capturada)")
+        else:
+            self.biplane_active = False
+            self.biplane_ref = None
+            print("Biplane: OFF")
+
+    def _toggle_sidebar(self):
+        self.show_sidebar = not self.show_sidebar
+
+    def _toggle_overlays(self):
+        self.show_overlays = not self.show_overlays
+        print(f"Overlays: {'ON' if self.show_overlays else 'OFF'}")
+
+    def _toggle_fullscreen(self):
+        self.fullscreen = not self.fullscreen
+        prop = cv2.WINDOW_FULLSCREEN if self.fullscreen else cv2.WINDOW_NORMAL
+        cv2.setWindowProperty(self.janela, cv2.WND_PROP_FULLSCREEN, prop)
+
+    def _zoom_in(self):
+        self.zoom_level = min(3.0, self.zoom_level + 0.1)
+        print(f"Zoom: {self.zoom_level:.1f}x")
+
+    def _zoom_out(self):
+        self.zoom_level = max(0.5, self.zoom_level - 0.1)
+        print(f"Zoom: {self.zoom_level:.1f}x")
+
+    def _pan_up(self):
+        self.pan_y -= 20
+
+    def _pan_down(self):
+        self.pan_y += 20
+
+    def _reset_view(self):
+        self.zoom_level = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+        print("View resetada")
+
+    def _desenhar_sidebar(self, altura):
+        sidebar = np.zeros((altura, self.SIDEBAR_W, 3), dtype=np.uint8)
+        sidebar[:] = (20, 20, 25)
+
+        # Logo
+        cv2.putText(sidebar, "USG", (15, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 165, 0), 2, cv2.LINE_AA)
+        cv2.putText(sidebar, "FLOW", (62, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.line(sidebar, (10, 42), (190, 42), (40, 40, 50), 1)
+
+        # Label MODOS
+        cv2.putText(sidebar, "MODOS", (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 110), 1, cv2.LINE_AA)
+
+        # Botoes de modo
+        for i, btn in enumerate(self.botoes_modo):
+            btn.ativo = (i == self.modo_idx)
+            btn.desenhar(sidebar)
+
+        # Separador
+        y_sep = self.botoes_modo[-1].y + self.botoes_modo[-1].h + 8
+        cv2.line(sidebar, (10, y_sep), (190, y_sep), (40, 40, 50), 1)
+        cv2.putText(sidebar, "CONTROLES", (10, y_sep + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 110), 1, cv2.LINE_AA)
+
+        # Botoes de controle
+        self.botoes_ctrl[0].ativo = self.pause
+        self.botoes_ctrl[1].ativo = self.ai_on
+        self.botoes_ctrl[2].ativo = self.recording
+        self.botoes_ctrl[4].ativo = self.biplane_active
+        for btn in self.botoes_ctrl:
+            btn.desenhar(sidebar)
+
+        # Separador
+        y_sep2 = self.botoes_ctrl[-1].y + self.botoes_ctrl[-1].h + 8
+        cv2.line(sidebar, (10, y_sep2), (190, y_sep2), (40, 40, 50), 1)
+        cv2.putText(sidebar, "VISUALIZACAO", (10, y_sep2 + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 110), 1, cv2.LINE_AA)
+
+        # Botoes de view
+        for btn in self.botoes_view:
+            if btn.texto == 'Overlays':
+                btn.ativo = self.show_overlays
+            elif btn.texto == 'Ajuda':
+                btn.ativo = self.show_help
+            btn.desenhar(sidebar)
+
+        # Footer - Status
+        footer_y = altura - 85
+        cv2.line(sidebar, (10, footer_y), (190, footer_y), (40, 40, 50), 1)
+
+        # Conexao
+        sy = footer_y + 18
+        if self.captura.connected:
+            cv2.circle(sidebar, (20, sy - 4), 4, (100, 255, 100), -1)
+            cv2.putText(sidebar, "Conectado", (30, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 255, 100), 1, cv2.LINE_AA)
+        else:
+            cv2.circle(sidebar, (20, sy - 4), 4, (80, 80, 80), -1)
+            cv2.putText(sidebar, "Aguardando...", (30, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (80, 80, 80), 1, cv2.LINE_AA)
+
+        # FPS
+        sy += 18
+        fps_cor = (100, 255, 100) if self.fps >= 25 else (0, 200, 255) if self.fps >= 15 else (0, 100, 255)
+        cv2.putText(sidebar, f"FPS: {self.fps}", (15, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.4, fps_cor, 1, cv2.LINE_AA)
+
+        # REC
+        if self.recording:
+            if int(time.time() * 2) % 2:
+                cv2.circle(sidebar, (160, sy - 5), 6, (0, 0, 255), -1)
+            cv2.putText(sidebar, "REC", (130, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1, cv2.LINE_AA)
+
+        # Modo e Zoom
+        sy += 18
+        modo_nome = self.MODOS[self.modo_idx][0]
+        modo_cor = self.MODOS[self.modo_idx][2]
+        cv2.putText(sidebar, f"{modo_nome}", (15, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.35, modo_cor, 1, cv2.LINE_AA)
+        cv2.putText(sidebar, f"Zoom: {self.zoom_level:.1f}x", (110, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 110), 1, cv2.LINE_AA)
+
+        # Resolucao
+        if self.frame_original is not None:
+            h, w = self.frame_original.shape[:2]
+            sy += 16
+            cv2.putText(sidebar, f"{w}x{h}", (15, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (80, 80, 90), 1, cv2.LINE_AA)
+
+        return sidebar
+
+    def _desenhar_instrucoes(self, frame):
+        """Desenha instrucoes contextuais na parte inferior."""
+        if not self.show_instructions or not self.show_overlays:
+            return frame
+
+        h, w = frame.shape[:2]
+        modo_nome = self.MODOS[self.modo_idx][0]
+        instrucao = MODE_INSTRUCTIONS.get(modo_nome, "")
+
+        if not instrucao:
+            return frame
+
+        # Fundo semi-transparente
+        overlay = frame.copy()
+        box_h = 50
+        cv2.rectangle(overlay, (0, h - box_h), (w, h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+
+        # Texto
+        cv2.putText(frame, instrucao, (20, h - 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 255), 1, cv2.LINE_AA)
+
+        return frame
+
+    def _desenhar_ajuda(self, frame):
+        """Desenha modal de ajuda."""
+        h, w = frame.shape[:2]
+
+        # Fundo escuro
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (w//5, h//8), (4*w//5, 7*h//8), (15, 15, 20), -1)
+        cv2.addWeighted(overlay, 0.95, frame, 0.05, 0, frame)
+        cv2.rectangle(frame, (w//5, h//8), (4*w//5, 7*h//8), (50, 50, 60), 2)
+
+        # Titulo
+        cv2.putText(frame, "ATALHOS DO TECLADO", (w//5 + 30, h//8 + 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 165, 0), 2, cv2.LINE_AA)
+
+        # Lista de atalhos
+        atalhos = [
+            ("1-9, 0, V", "Selecionar modo"),
+            ("F", "Freeze/Pause"),
+            ("A", "Ativar/Desativar AI"),
+            ("R", "Iniciar/Parar gravacao"),
+            ("S", "Screenshot (PNG)"),
+            ("B", "Toggle Biplane"),
+            ("H", "Esconder/Mostrar overlays"),
+            ("I", "Esconder/Mostrar instrucoes"),
+            ("T", "Esconder/Mostrar sidebar"),
+            ("+/-", "Zoom In/Out"),
+            ("Setas", "Pan (mover imagem)"),
+            ("0 (view)", "Reset visualizacao"),
+            ("?", "Esta ajuda"),
+            ("F11", "Fullscreen"),
+            ("Q/ESC", "Sair"),
+        ]
+
+        y = h//8 + 80
+        for tecla, desc in atalhos:
+            cv2.putText(frame, f"[{tecla}]", (w//5 + 30, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1, cv2.LINE_AA)
+            cv2.putText(frame, desc, (w//5 + 150, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
+            y += 28
+
+        # Instrucao para fechar
+        cv2.putText(frame, "Pressione ? para fechar", (w//5 + 30, 7*h//8 - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (80, 80, 90), 1, cv2.LINE_AA)
+
+        return frame
+
+    def _aplicar_zoom_pan(self, frame):
+        """Aplica zoom e pan ao frame."""
+        if self.zoom_level == 1.0 and self.pan_x == 0 and self.pan_y == 0:
+            return frame
+
+        h, w = frame.shape[:2]
+        new_w = int(w * self.zoom_level)
+        new_h = int(h * self.zoom_level)
+
+        # Resize
+        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        # Calcular crop com pan
+        cx = (new_w - w) // 2 - self.pan_x
+        cy = (new_h - h) // 2 - self.pan_y
+
+        # Limites
+        cx = max(0, min(new_w - w, cx))
+        cy = max(0, min(new_h - h, cy))
+
+        # Crop
+        cropped = resized[cy:cy+h, cx:cx+w]
+
+        return cropped
+
+    def rodar(self):
+        """Loop principal."""
+        frame_count = 0
+        fps_time = time.time()
+
         while self.running:
             # Captura
-            if not self.freeze and self.cap:
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
-                    self.frame = frame
+            if not self.pause:
+                f = self.captura.get_frame()
+                if f is not None:
+                    self.frame_original = f
+                    self.recorder.add_frame(f)
 
-            # Render UI
-            display = self.ui.render(self)
+            # Montar display
+            if self.frame_original is not None:
+                h, w = self.frame_original.shape[:2]
 
-            # Gravar frame original
-            if self.recording and self.video_writer and self.frame is not None:
-                self.video_writer.write(self.frame)
+                # Imagem para display (COPIA do original)
+                display_img = self.frame_original.copy()
 
-            # Mostrar
-            cv2.imshow(config.WINDOW_NAME, display)
+                # AI (se ligada)
+                if self.ai_on and self.ai:
+                    try:
+                        display_img = self.ai.process(display_img)
+                    except:
+                        pass
+
+                # Zoom/Pan
+                display_img = self._aplicar_zoom_pan(display_img)
+
+                # Biplane
+                if self.biplane_active and self.biplane_ref is not None:
+                    ref_resized = cv2.resize(self.biplane_ref, (w//2, h))
+                    curr_resized = cv2.resize(display_img, (w//2, h))
+                    display_img = np.hstack([ref_resized, curr_resized])
+                    if self.show_overlays:
+                        cv2.putText(display_img, "REF", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        cv2.putText(display_img, "LIVE", (w//2 + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                # Instrucoes
+                if self.show_overlays:
+                    display_img = self._desenhar_instrucoes(display_img)
+
+                # Sidebar
+                if self.show_sidebar:
+                    sidebar = self._desenhar_sidebar(display_img.shape[0])
+                    display = np.hstack([sidebar, display_img])
+                else:
+                    display = display_img
+
+                # Ajuda
+                if self.show_help:
+                    display = self._desenhar_ajuda(display)
+
+            else:
+                # Tela de espera
+                h = 720
+                espera = np.zeros((h, 1280, 3), dtype=np.uint8)
+                espera[:] = (12, 12, 15)
+                cv2.putText(espera, "AGUARDANDO SINAL", (450, 320),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (80, 80, 80), 2)
+                cv2.putText(espera, "Conecte iPhone via QuickTime", (420, 370),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 1)
+                cv2.putText(espera, "Menu > Arquivo > Nova Gravacao de Filme > iPhone", (350, 410),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (60, 60, 70), 1)
+
+                if self.show_sidebar:
+                    sidebar = self._desenhar_sidebar(h)
+                    display = np.hstack([sidebar, espera])
+                else:
+                    display = espera
+
+            cv2.imshow(self.janela, display)
 
             # FPS
-            self.frame_count += 1
-            if time.time() - self.fps_time >= 1.0:
-                self.fps = self.frame_count
-                self.frame_count = 0
-                self.fps_time = time.time()
+            frame_count += 1
+            if time.time() - fps_time >= 1:
+                self.fps = frame_count
+                frame_count = 0
+                fps_time = time.time()
 
             # Teclas
-            key = cv2.waitKey(1) & 0xFF
-
-            if key == ord('q') or key == 27:
-                self.running = False
-            elif key == ord('h'):
+            k = cv2.waitKey(1) & 0xFF
+            if k == ord('q') or k == 27:
+                break
+            elif k == ord('f'):
+                self._toggle_pause()
+            elif k == ord('a'):
+                self._toggle_ai()
+            elif k == ord('r'):
+                self._toggle_recording()
+            elif k == ord('s'):
+                self._screenshot()
+            elif k == ord('b'):
+                self._toggle_biplane()
+            elif k == ord('h'):
+                self._toggle_overlays()
+            elif k == ord('i'):
+                self.show_instructions = not self.show_instructions
+            elif k == ord('t'):
+                self._toggle_sidebar()
+            elif k == ord('+') or k == ord('='):
+                self._zoom_in()
+            elif k == ord('-'):
+                self._zoom_out()
+            elif k == 82:  # Seta cima
+                self._pan_up()
+            elif k == 84:  # Seta baixo
+                self._pan_down()
+            elif k == ord('/') or k == ord('?'):
                 self.show_help = not self.show_help
-            elif key == ord('f'):
-                self.freeze = not self.freeze
-            elif key == ord('r'):
-                if self.recording:
-                    self.stop_recording()
+            elif k == 122:  # F11
+                self._toggle_fullscreen()
+            # Modos por numero
+            elif ord('1') <= k <= ord('9'):
+                self._set_modo(k - ord('1'))
+            elif k == ord('0'):
+                if self.zoom_level != 1.0 or self.pan_y != 0:
+                    self._reset_view()
                 else:
-                    self.start_recording()
-            elif key == ord('s'):
-                self.screenshot()
-            elif key == ord('m'):
-                self.next_mode()
-            elif key == ord('a'):
-                self.ai_enabled = not self.ai_enabled
-                print(f"IA: {'ON' if self.ai_enabled else 'OFF'}")
-            elif key == ord('c'):
-                self.next_camera()
-            elif key == ord('t'):
-                self.show_sidebar = not self.show_sidebar
-            elif ord('1') <= key <= ord('6'):
-                self.set_mode(key - ord('1'))
+                    self._set_modo(9)  # PULMAO
+            elif k == ord('v'):
+                self._set_modo(10)  # BEXIGA
 
         # Cleanup
         if self.recording:
-            self.stop_recording()
-        if self.cap:
-            self.cap.release()
+            self.recorder.stop_recording()
+        self.captura.stop()
         cv2.destroyAllWindows()
-        print("\nAte mais!")
 
 
 if __name__ == '__main__':
-    app = USGFinal()
-    app.run()
+    USGApp().rodar()
