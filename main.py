@@ -377,10 +377,16 @@ class USGApp:
 
     def _toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
-        prop = cv2.WINDOW_FULLSCREEN if self.fullscreen else cv2.WINDOW_NORMAL
-        cv2.setWindowProperty(self.janela, cv2.WND_PROP_FULLSCREEN, prop)
-        if not self.fullscreen:
+        if self.fullscreen:
+            # Ir para fullscreen
+            cv2.setWindowProperty(self.janela, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            cv2.moveWindow(self.janela, 0, 0)
+        else:
+            # Sair do fullscreen
+            cv2.setWindowProperty(self.janela, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(self.janela, 1700, 950)
+            cv2.moveWindow(self.janela, 50, 50)
+        print(f"Fullscreen: {'ON' if self.fullscreen else 'OFF'}")
 
     def _get_screen_size(self):
         """Obtem tamanho da tela para fullscreen."""

@@ -221,21 +221,30 @@ Arquivos de pesquisa em:
 - Resolution Scaling por modo
 - Fallback CV quando modelo nao disponivel
 
-### Pendencias:
-- Baixar/treinar modelos para modos sem AI real:
-  - EchoNet para CARDIACO
-  - USFM para ANATOMIA
-  - Detector FAST para trauma
-  - Modelo bexiga para BLADDER
-- Testar performance em tempo real
-- Implementar Voice Controls (futuro)
+### Funcionalidades OK (testadas):
+- ✅ Interface completa com 11 modos
+- ✅ Captura de tela iPhone via AIRPLAY
+- ✅ Todos os modos AI com fallback CV
+- ✅ Gravacao de video MP4
+- ✅ Screenshot PNG
+- ✅ Zoom/Pan
+- ✅ Biplane
+- ✅ Fullscreen (corrigido)
+- ✅ MPS/GPU Apple Silicon
+
+### Modelos Disponiveis:
+- ✅ `models/best.pt` - YOLOv8n
+- ✅ `models/yolov8n.pt` - YOLOv8n
+
+### Para Melhorar (Futuro):
+- Treinar YOLO especifico para agulhas de ultrassom
+- Baixar/treinar EchoNet para fracao de ejecao real
+- Implementar voice controls
 - Adicionar geracao de relatorios
 
 ### Proximos passos sugeridos:
-1. Testar app com QuickTime + iPhone
-2. Verificar se todos os modos funcionam
-3. Medir FPS e tempo de inferencia
-4. Baixar modelos adicionais se necessario
-5. Treinar modelos custom se necessario
+1. Testar app com QuickTime + iPhone em uso real
+2. Treinar modelo YOLO custom para agulhas
+3. Adicionar mais funcionalidades conforme necessidade
 
 ====================================================================
