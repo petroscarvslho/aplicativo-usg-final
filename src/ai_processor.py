@@ -450,6 +450,10 @@ class AIProcessor:
             # Fallback: Needle Enhance por CV
             output = self._cv_needle_enhance(frame)
 
+        # Label do modo
+        cv2.putText(output, "NEEDLE PILOT", (20, 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
         return output
 
     def _cv_needle_enhance(self, frame):
@@ -475,11 +479,11 @@ class AIProcessor:
         """Nerve Track - Segmentacao de nervos."""
         model = self.models.get('nerve')
         output = frame.copy()
+        h, w = frame.shape[:2]
 
         if model:
             # Preparar input
             config_mode = self.MODE_CONFIG['nerve']
-            h, w = frame.shape[:2]
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             input_size = (224, 224)
@@ -519,6 +523,45 @@ class AIProcessor:
                                 cy = int(M["m01"] / M["m00"])
                                 cv2.putText(output, labels[i], (cx, cy),
                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[i], 2)
+        else:
+            # Fallback: Deteccao de estruturas circulares (nervos/vasos)
+            output = self._cv_nerve_enhance(frame)
+
+        # Label do modo
+        cv2.putText(output, "NERVE TRACK", (20, 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+        return output
+
+    def _cv_nerve_enhance(self, frame):
+        """Realce de estruturas nervosas por CV."""
+        output = frame.copy()
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Equalizar histograma para melhor contraste
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        # Detectar circulos (nervos/vasos em corte transversal)
+        circles = cv2.HoughCircles(
+            enhanced, cv2.HOUGH_GRADIENT, 1, 30,
+            param1=50, param2=30, minRadius=10, maxRadius=80
+        )
+
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            for i, (x, y, r) in enumerate(circles[0, :5]):  # Max 5 circulos
+                # Cor baseada no tamanho (nervo=maior=amarelo, vaso=menor=vermelho)
+                if r > 40:
+                    color = (0, 255, 255)  # Amarelo - provavel nervo
+                    label = "Nervo?"
+                else:
+                    color = (0, 0, 255)  # Vermelho - provavel vaso
+                    label = "Vaso?"
+                cv2.circle(output, (x, y), r, color, 2)
+                cv2.putText(output, label, (x - 20, y - r - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
         return output
 

@@ -335,6 +335,8 @@ class USGApp:
             try:
                 from src.ai_processor import AIProcessor
                 self.ai = AIProcessor()
+                # Configurar modo atual
+                self._set_modo(self.modo_idx)
             except Exception as e:
                 print(f"Erro AI: {e}")
                 self.ai_on = False
@@ -377,6 +379,17 @@ class USGApp:
         self.fullscreen = not self.fullscreen
         prop = cv2.WINDOW_FULLSCREEN if self.fullscreen else cv2.WINDOW_NORMAL
         cv2.setWindowProperty(self.janela, cv2.WND_PROP_FULLSCREEN, prop)
+        if not self.fullscreen:
+            cv2.resizeWindow(self.janela, 1700, 950)
+
+    def _get_screen_size(self):
+        """Obtem tamanho da tela para fullscreen."""
+        try:
+            import Quartz
+            main_monitor = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+            return int(main_monitor.size.width), int(main_monitor.size.height)
+        except:
+            return 1920, 1080  # Fallback
 
     def _zoom_in(self):
         self.zoom_level = min(3.0, self.zoom_level + 0.1)
@@ -391,6 +404,12 @@ class USGApp:
 
     def _pan_down(self):
         self.pan_y += 20
+
+    def _pan_left(self):
+        self.pan_x -= 20
+
+    def _pan_right(self):
+        self.pan_x += 20
 
     def _reset_view(self):
         self.zoom_level = 1.0
@@ -587,7 +606,8 @@ class USGApp:
                 f = self.captura.get_frame()
                 if f is not None:
                     self.frame_original = f
-                    self.recorder.add_frame(f)
+                    if self.recording:
+                        self.recorder.add_frame(f)
 
             # Montar display
             if self.frame_original is not None:
@@ -648,6 +668,12 @@ class USGApp:
                 else:
                     display = espera
 
+            # Fullscreen: redimensionar para preencher a tela toda
+            if self.fullscreen:
+                screen_w, screen_h = self._get_screen_size()
+                if display.shape[1] != screen_w or display.shape[0] != screen_h:
+                    display = cv2.resize(display, (screen_w, screen_h), interpolation=cv2.INTER_LINEAR)
+
             cv2.imshow(self.janela, display)
 
             # FPS
@@ -681,13 +707,19 @@ class USGApp:
                 self._zoom_in()
             elif k == ord('-'):
                 self._zoom_out()
-            elif k == 82:  # Seta cima
+            # Setas (codigos variam por sistema - testando multiplos)
+            elif k == 82 or k == 0:  # Seta cima
                 self._pan_up()
-            elif k == 84:  # Seta baixo
+            elif k == 84 or k == 1:  # Seta baixo
                 self._pan_down()
+            elif k == 81 or k == 2:  # Seta esquerda
+                self._pan_left()
+            elif k == 83 or k == 3:  # Seta direita
+                self._pan_right()
             elif k == ord('/') or k == ord('?'):
                 self.show_help = not self.show_help
-            elif k == 122:  # F11
+            # F11 (varios codigos possiveis)
+            elif k == 122 or k == 201 or k == 144:  # F11
                 self._toggle_fullscreen()
             # Modos por numero
             elif ord('1') <= k <= ord('9'):
