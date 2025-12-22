@@ -463,6 +463,8 @@ class AIProcessor:
         self.lung_a_lines_detected = False
         self.lung_pleura_sliding = True
         self.lung_consolidation = False
+        self.lung_pleura_history = deque(maxlen=12)
+        self.lung_b_line_density_history = deque(maxlen=30)
 
         # Bladder AI
         self.bladder_history = deque(maxlen=30)
@@ -1261,6 +1263,8 @@ class AIProcessor:
             self.lung_a_lines_detected = False
             self.lung_pleura_sliding = True
             self.lung_consolidation = False
+            self.lung_pleura_history.clear()
+            self.lung_b_line_density_history.clear()
 
         elif old_mode == 'bladder':
             self.bladder_history.clear()
@@ -3869,6 +3873,10 @@ class AIProcessor:
                 if angle < 15:  # Quase horizontal
                     pleura_y = h//6 + (y1 + y2) // 2
                     break
+        pleura_y = int(np.clip(pleura_y, h // 8, h // 2))
+        self.lung_pleura_history.append(pleura_y)
+        if len(self.lung_pleura_history) >= 3:
+            pleura_y = int(np.median(self.lung_pleura_history))
 
         # Desenhar linha pleural com glow
         cv2.line(output, (50, pleura_y), (w - 50, pleura_y), (80, 100, 80), 3)
@@ -3924,77 +3932,156 @@ class AIProcessor:
         # ═══════════════════════════════════════
         # DETECCAO DE B-LINES (linhas verticais)
         # ═══════════════════════════════════════
-
-        # Filtro vertical para B-lines
-        v_kernel = np.array([[-1, 2, -1]])
-        b_edges = cv2.filter2D(below_pleura, -1, v_kernel)
-        _, b_thresh = cv2.threshold(b_edges, 100, 255, cv2.THRESH_BINARY)
-
-        # Detectar B-lines
-        b_lines = cv2.HoughLinesP(b_thresh, 1, np.pi/180, 30, minLineLength=(h - pleura_y)//3, maxLineGap=20)
-
         b_line_count = 0
         b_line_positions = []
+        b_line_density = 0.0
 
-        if b_lines is not None:
-            for line in b_lines:
-                x1, y1, x2, y2 = line[0]
-                angle = abs(np.arctan2(y2-y1, x2-x1) * 180 / np.pi)
-                if 75 < angle < 105:  # Quase vertical
-                    # Evitar B-lines muito proximas
-                    x_center = (x1 + x2) // 2
-                    if all(abs(x_center - px) > 30 for px in b_line_positions):
-                        b_line_positions.append(x_center)
-                        b_line_count += 1
+        if below_pleura.shape[0] > 20:
+            # Realcar linhas verticais brilhantes
+            v_sobel = cv2.Sobel(below_pleura, cv2.CV_32F, 1, 0, ksize=3)
+            v_sobel = np.abs(v_sobel)
+            v_sobel = cv2.normalize(v_sobel, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-                        # Desenhar B-line com glow e gradiente
-                        actual_y1 = pleura_y + min(y1, y2)
-                        actual_y2 = pleura_y + max(y1, y2)
+            bright_thresh = np.percentile(below_pleura, 88)
+            bright_mask = (below_pleura >= bright_thresh).astype(np.uint8) * 255
+            v_resp = cv2.bitwise_and(v_sobel, bright_mask)
 
-                        # Glow
-                        cv2.line(output, (x_center, actual_y1), (x_center, actual_y2),
-                                (0, 80, 120), 4)
+            # Conectar estruturas verticais
+            k = max(15, int(below_pleura.shape[0] * 0.35))
+            v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k))
+            v_resp = cv2.morphologyEx(v_resp, cv2.MORPH_CLOSE, v_kernel)
 
-                        # Gradiente de intensidade
-                        for t in range(0, 100, 5):
-                            ratio = t / 100.0
-                            py1 = int(actual_y1 + (actual_y2 - actual_y1) * ratio)
-                            py2 = int(actual_y1 + (actual_y2 - actual_y1) * (ratio + 0.05))
-                            intensity = int(150 + 105 * ratio)
-                            cv2.line(output, (x_center, py1), (x_center, py2),
-                                    (0, intensity, 255), 2)
+            nonzero = v_resp[v_resp > 0]
+            thr = int(np.percentile(nonzero, 60)) if nonzero.size else 0
+            thr = max(20, thr)
+            _, v_bin = cv2.threshold(v_resp, thr, 255, cv2.THRESH_BINARY)
 
-                        # Label B
-                        cv2.putText(output, "B", (x_center - 5, actual_y1 - 5),
-                                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 200, 255), 1, cv2.LINE_AA)
+            col_sum = np.sum(v_bin > 0, axis=0)
+            min_len = int(below_pleura.shape[0] * 0.35)
+            col_mask = col_sum >= min_len
 
-                        if b_line_count >= 8:
-                            break
+            clusters = []
+            i = 0
+            while i < len(col_mask):
+                if col_mask[i]:
+                    start = i
+                    while i < len(col_mask) and col_mask[i]:
+                        i += 1
+                    end = i - 1
+                    clusters.append([start, end])
+                i += 1
+
+            merged = []
+            for start, end in clusters:
+                if not merged or start - merged[-1][1] > 6:
+                    merged.append([start, end])
+                else:
+                    merged[-1][1] = end
+            clusters = merged
+
+            total_width = sum((end - start + 1) for start, end in clusters)
+            b_line_density = total_width / max(1, len(col_mask))
+            b_line_count = min(10, max(len(clusters), int(round(b_line_density * 10))))
+
+            for start, end in clusters[:10]:
+                x_center = (start + end) // 2
+                col = v_bin[:, x_center] > 0
+                ys = np.where(col)[0]
+                if ys.size == 0:
+                    continue
+                actual_y1 = pleura_y + int(ys[0])
+                actual_y2 = pleura_y + int(ys[-1])
+                if actual_y2 - actual_y1 < min_len * 0.6:
+                    continue
+
+                b_line_positions.append(x_center)
+
+                # Glow
+                cv2.line(output, (x_center, actual_y1), (x_center, actual_y2),
+                        (0, 80, 120), 4)
+
+                # Gradiente de intensidade
+                for t in range(0, 100, 5):
+                    ratio = t / 100.0
+                    py1 = int(actual_y1 + (actual_y2 - actual_y1) * ratio)
+                    py2 = int(actual_y1 + (actual_y2 - actual_y1) * (ratio + 0.05))
+                    intensity = int(150 + 105 * ratio)
+                    cv2.line(output, (x_center, py1), (x_center, py2),
+                            (0, intensity, 255), 2)
+
+                cv2.putText(output, "B", (x_center - 5, actual_y1 - 5),
+                           cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 200, 255), 1, cv2.LINE_AA)
+
+        # Fallback com Hough se nao detectar nada
+        if b_line_count == 0:
+            v_kernel = np.array([[-1, 2, -1]])
+            b_edges = cv2.filter2D(below_pleura, -1, v_kernel)
+            _, b_thresh = cv2.threshold(b_edges, 100, 255, cv2.THRESH_BINARY)
+            b_lines = cv2.HoughLinesP(
+                b_thresh,
+                1,
+                np.pi / 180,
+                30,
+                minLineLength=(h - pleura_y) // 3,
+                maxLineGap=20
+            )
+
+            if b_lines is not None:
+                for line in b_lines:
+                    x1, y1, x2, y2 = line[0]
+                    angle = abs(np.arctan2(y2-y1, x2-x1) * 180 / np.pi)
+                    if 75 < angle < 105:
+                        x_center = (x1 + x2) // 2
+                        if all(abs(x_center - px) > 30 for px in b_line_positions):
+                            b_line_positions.append(x_center)
+                            b_line_count += 1
+
+                            actual_y1 = pleura_y + min(y1, y2)
+                            actual_y2 = pleura_y + max(y1, y2)
+                            cv2.line(output, (x_center, actual_y1), (x_center, actual_y2),
+                                    (0, 80, 120), 4)
+                            cv2.line(output, (x_center, actual_y1), (x_center, actual_y2),
+                                    (0, 200, 255), 2)
+                            cv2.putText(output, "B", (x_center - 5, actual_y1 - 5),
+                                       cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 200, 255), 1, cv2.LINE_AA)
+
+                            if b_line_count >= 8:
+                                break
 
         self.b_line_count = b_line_count
         self.lung_b_line_history.append(b_line_count)
+        self.lung_b_line_density_history.append(b_line_density)
 
         # ═══════════════════════════════════════
         # ANALISE E CLASSIFICACAO
         # ═══════════════════════════════════════
 
         avg_b_lines = np.mean(list(self.lung_b_line_history)) if self.lung_b_line_history else 0
+        avg_density = np.mean(list(self.lung_b_line_density_history)) if self.lung_b_line_density_history else 0
+        severity_score = max(avg_b_lines, avg_density * 10)
+        display_b_lines = int(np.clip(round(severity_score), 0, 10))
+        self.b_line_count = display_b_lines
 
-        if avg_b_lines <= 2:
+        if severity_score <= 2:
             profile = "A-PROFILE"
             status = "NORMAL"
             status_color = (100, 255, 100)
             interpretation = "Normal lung pattern"
-        elif avg_b_lines <= 5:
+        elif severity_score <= 5:
             profile = "B-PROFILE"
             status = "MILD"
             status_color = (0, 255, 255)
             interpretation = "Interstitial syndrome"
-        else:
+        elif severity_score <= 8:
             profile = "B-PROFILE"
             status = "MODERATE"
             status_color = (0, 100, 255)
             interpretation = "Pulmonary edema likely"
+        else:
+            profile = "B-PROFILE"
+            status = "SEVERE"
+            status_color = (0, 0, 255)
+            interpretation = "Severe pulmonary edema"
 
         # ═══════════════════════════════════════
         # PAINEL PRINCIPAL
@@ -4023,7 +4110,7 @@ class AIProcessor:
         bl_y = panel_y + 55
         cv2.putText(output, "B-LINES", (panel_x + 10, bl_y),
                    cv2.FONT_HERSHEY_DUPLEX, 0.3, (120, 140, 100), 1, cv2.LINE_AA)
-        cv2.putText(output, str(b_line_count), (panel_x + 80, bl_y + 25),
+        cv2.putText(output, str(display_b_lines), (panel_x + 80, bl_y + 25),
                    cv2.FONT_HERSHEY_DUPLEX, 1.5, status_color, 2, cv2.LINE_AA)
 
         # A-Lines
@@ -4063,9 +4150,9 @@ class AIProcessor:
 
         # Gradiente de severidade
         for i, (start, end, color) in enumerate([(0, 2, (80, 200, 80)), (2, 5, (0, 200, 200)), (5, 10, (0, 100, 255))]):
-            if b_line_count > start:
+            if display_b_lines > start:
                 x1 = panel_x + 10 + int(bar_w * start / 10)
-                x2 = panel_x + 10 + int(bar_w * min(b_line_count, end) / 10)
+                x2 = panel_x + 10 + int(bar_w * min(display_b_lines, end) / 10)
                 cv2.rectangle(output, (x1, bar_y), (x2, bar_y + 6), color, -1)
 
         # ═══════════════════════════════════════

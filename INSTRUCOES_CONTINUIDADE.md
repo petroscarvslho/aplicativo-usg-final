@@ -209,6 +209,7 @@ Arquivos de pesquisa em:
 - VASST no app agora le metadata e suporta label order/scale automaticamente.
 - REFERENCIAS.md expandido com pesquisa externa (apps pagos, AI comerciais,
   papers/whitepapers, datasets, repos GitHub e threads do Reddit).
+- LUNG AI fallback CV com Auto B-lines (densidade + clusters) e pleura_y suavizado.
 
 ====================================================================
 ## PROJETOS RELACIONADOS

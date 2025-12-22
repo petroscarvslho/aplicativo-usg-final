@@ -1,6 +1,24 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-22 - Sessao 13: LUNG AI - Auto B-Lines (Fallback CV)
+====================================================================
+
+### Resumo
+Implementacao de Auto B-lines no fallback CV do LUNG AI para manter
+contagem estavel e coerente mesmo sem modelo treinado.
+
+### Melhorias Principais
+1. **Realce vertical** com Sobel + mascara de brilho
+2. **Conexao vertical** por morfologia para linhas longas
+3. **Score por densidade** (confluentes) + contagem de clusters
+4. **Suavizacao temporal** com historico de densidade
+5. **Classificacao severidade** baseada em score combinado
+
+### Arquivos Modificados
+- `src/ai_processor.py` - Auto B-lines e suavizacao do pleura_y
+
+====================================================================
 ## 2025-12-22 - Sessao 12: Pesquisa Externa (Apps, AI, GitHub, Reddit)
 ====================================================================
 
