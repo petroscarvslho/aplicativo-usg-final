@@ -411,6 +411,7 @@ class AIProcessor:
         self.fast_current_window = 'RUQ'
         self.fast_start_time = None
         self.fast_fluid_regions = []
+        self.fast_window_history = {key: deque(maxlen=8) for key in self.fast_windows}
 
         # Anatomy AI
         self.anatomy_structures = []
@@ -1199,6 +1200,7 @@ class AIProcessor:
             self.fast_current_window = 'RUQ'
             self.fast_start_time = None
             self.fast_fluid_regions.clear()
+            self.fast_window_history = {key: deque(maxlen=8) for key in self.fast_windows}
 
         elif old_mode == 'm_mode':
             self.mmode_buffer.clear()
@@ -2690,56 +2692,140 @@ class AIProcessor:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
+        enhanced = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
-        # Detectar areas anecoicas (escuras) - possiveis fluidos
-        _, dark_thresh = cv2.threshold(enhanced, 35, 255, cv2.THRESH_BINARY_INV)
+        # ROI suave por janela (usado para threshold/score, nao restringe detecao)
+        roi_map = {
+            'RUQ': (0.45, 0.05, 0.5, 0.5),
+            'LUQ': (0.05, 0.05, 0.5, 0.5),
+            'PELV': (0.2, 0.55, 0.6, 0.4),
+            'CARD': (0.2, 0.05, 0.6, 0.45),
+        }
+        rx, ry, rw, rh = roi_map.get(self.fast_current_window, (0.1, 0.1, 0.8, 0.8))
+        x0 = max(0, int(w * rx))
+        y0 = max(0, int(h * ry))
+        x1 = min(w, int(w * (rx + rw)))
+        y1 = min(h, int(h * (ry + rh)))
+        roi = enhanced[y0:y1, x0:x1]
+        if roi.size == 0:
+            roi = enhanced
+            x0, y0, x1, y1 = 0, 0, w, h
+
+        roi_mean = float(np.mean(roi))
+        thresh_val = int(np.clip(np.percentile(roi, 12), 18, 60))
+
+        # Detectar areas anecoicas (escuras) - threshold adaptativo
+        _, dark_thresh = cv2.threshold(enhanced, thresh_val, 255, cv2.THRESH_BINARY_INV)
 
         # Morfologia para limpar
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         dark_thresh = cv2.morphologyEx(dark_thresh, cv2.MORPH_OPEN, kernel)
         dark_thresh = cv2.morphologyEx(dark_thresh, cv2.MORPH_CLOSE, kernel)
+        dark_thresh = cv2.GaussianBlur(dark_thresh, (3, 3), 0)
+        _, dark_thresh = cv2.threshold(dark_thresh, 127, 255, cv2.THRESH_BINARY)
 
         # Encontrar contornos de fluido
         contours, _ = cv2.findContours(dark_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        if not hasattr(self, "fast_window_history"):
+            self.fast_window_history = {key: deque(maxlen=8) for key in self.fast_windows}
+
         fluid_detected = False
-        fluid_score = 0
         self.fast_fluid_regions = []
+        candidates = []
+
+        roi_area = max(1, (x1 - x0) * (y1 - y0))
+        min_area = max(200, int(roi_area * 0.002))
+        max_area = int(roi_area * 0.25)
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if 500 < area < 50000:  # Tamanho razoavel para fluido
-                # Verificar forma (fluido tende a ser alongado entre estruturas)
-                x, y, cw, ch = cv2.boundingRect(cnt)
-                aspect = max(cw, ch) / (min(cw, ch) + 1)
+            if area < min_area or area > max_area:
+                continue
 
-                if aspect > 1.5:  # Formato alongado
-                    fluid_detected = True
-                    fluid_score += area / 1000
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            if cw < 15 or ch < 15:
+                continue
 
-                    self.fast_fluid_regions.append({
-                        'contour': cnt,
-                        'area': area,
-                        'center': (x + cw//2, y + ch//2)
-                    })
+            mask = np.zeros_like(gray, dtype=np.uint8)
+            cv2.drawContours(mask, [cnt], -1, 255, -1)
+            mean_inside = cv2.mean(enhanced, mask=mask)[0]
+            contrast = max(0.0, roi_mean - mean_inside)
+            if contrast < 8:
+                continue
 
-                    # Desenhar regiao de fluido com destaque
-                    overlay = output.copy()
-                    cv2.drawContours(overlay, [cnt], -1, (0, 100, 200), -1)
-                    cv2.addWeighted(overlay, 0.3, output, 0.7, 0, output)
+            hull = cv2.convexHull(cnt)
+            hull_area = cv2.contourArea(hull)
+            solidity = area / hull_area if hull_area > 0 else 0.0
+            if solidity < 0.45:
+                continue
 
-                    cv2.drawContours(output, [cnt], -1, (0, 80, 150), 3)
-                    cv2.drawContours(output, [cnt], -1, (0, 150, 255), 2)
+            aspect = max(cw, ch) / (min(cw, ch) + 1)
+            cx, cy = x + cw // 2, y + ch // 2
+            in_roi = x0 <= cx <= x1 and y0 <= cy <= y1
 
-                    # Label FLUID
-                    cv2.putText(output, "FLUID?", (x + cw//2 - 25, y - 8),
-                               cv2.FONT_HERSHEY_DUPLEX, 0.4, (0, 200, 255), 1, cv2.LINE_AA)
+            area_score = min(area / (0.08 * roi_area), 1.0)
+            contrast_score = min(contrast / 40.0, 1.0)
+            solidity_score = min(max(solidity - 0.45, 0.0) / 0.55, 1.0)
+            aspect_score = min(max(aspect - 1.0, 0.0) / 3.0, 1.0)
+            roi_bonus = 1.0 if in_roi else 0.7
+
+            score = (
+                0.4 * contrast_score
+                + 0.3 * area_score
+                + 0.2 * solidity_score
+                + 0.1 * aspect_score
+            ) * roi_bonus
+
+            candidates.append({
+                'contour': cnt,
+                'area': area,
+                'center': (cx, cy),
+                'score': score,
+                'bbox': (x, y, cw, ch),
+            })
+
+        candidates.sort(key=lambda c: c['score'], reverse=True)
+        best_score = candidates[0]['score'] if candidates else 0.0
+
+        history = self.fast_window_history[self.fast_current_window]
+        history.append(best_score)
+        avg_score = float(np.mean(history)) if history else 0.0
+
+        fluid_detected = avg_score >= 0.35
+        if candidates:
+            for cand in candidates[:2]:
+                if cand['score'] < 0.25:
+                    continue
+                self.fast_fluid_regions.append({
+                    'contour': cand['contour'],
+                    'area': cand['area'],
+                    'center': cand['center'],
+                })
+
+        # Desenhar regioes candidatas
+        for region in self.fast_fluid_regions:
+            cnt = region['contour']
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            overlay = output.copy()
+            cv2.drawContours(overlay, [cnt], -1, (0, 100, 200), -1)
+            cv2.addWeighted(overlay, 0.3, output, 0.7, 0, output)
+
+            cv2.drawContours(output, [cnt], -1, (0, 80, 150), 3)
+            cv2.drawContours(output, [cnt], -1, (0, 150, 255), 2)
+
+            cv2.putText(output, "FLUID?", (x + cw//2 - 25, y - 8),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.4, (0, 200, 255), 1, cv2.LINE_AA)
 
         # Atualizar janela atual
         current_win = self.fast_windows[self.fast_current_window]
         if fluid_detected:
             current_win['fluid'] = True
-            current_win['score'] = min(10, int(fluid_score))
+            current_win['score'] = min(10, int(avg_score * 10))
+        else:
+            current_win['score'] = max(current_win['score'] - 1, 0)
+            if avg_score < 0.2:
+                current_win['fluid'] = False
 
         # ═══════════════════════════════════════
         # HEADER PREMIUM
@@ -2925,7 +3011,7 @@ class AIProcessor:
         # INDICADORES DE FLUIDO (overlay central)
         # ═══════════════════════════════════════
 
-        if len(self.fast_fluid_regions) > 0:
+        if fluid_detected and len(self.fast_fluid_regions) > 0:
             # Alerta de fluido detectado
             alert_y = 60
             cv2.rectangle(output, (w//2 - 80, alert_y), (w//2 + 80, alert_y + 28),

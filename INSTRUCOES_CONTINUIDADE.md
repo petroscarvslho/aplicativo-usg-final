@@ -199,7 +199,10 @@ Arquivos de pesquisa em:
 ## ESTADO ATUAL DO PROJETO (ATUALIZAR A CADA SESSAO)
 ====================================================================
 
-### Ultima atualizacao: 2025-12-22 (Sessao 10)
+### Ultima atualizacao: 2025-12-22 (Sessao 11)
+
+- FAST Protocol (fallback CV) otimizado: threshold adaptativo, filtros de contorno,
+  suavizacao temporal e alerta apenas com deteccao estabilizada.
 
 ====================================================================
 ## PROJETOS RELACIONADOS

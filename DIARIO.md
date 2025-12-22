@@ -1,6 +1,23 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-22 - Sessao 11: FAST Protocol - Fallback CV Otimizado
+====================================================================
+
+### Resumo
+Otimizacao do FAST Protocol para funcionar melhor sem modelo treinado,
+com deteccao de liquido livre mais estavel e menos falsos positivos.
+
+### Melhorias Principais
+1. **Threshold adaptativo** por percentil com base em ROI suave por janela
+2. **Filtros de contorno** por area relativa, contraste e solidez
+3. **Suavizacao temporal** com historico por janela e histerese
+4. **Alertas** apenas quando a deteccao esta estabilizada
+
+### Arquivos Modificados
+- `src/ai_processor.py` - Novo pipeline CV do FAST + historico por janela
+
+====================================================================
 ## 2025-12-22 - Sessao 10: NERVE TRACK v2.0 + Atlas Educacional
 ====================================================================
 
@@ -467,3 +484,54 @@ Criacao do projeto APLICATIVO USG FINAL - app 100% Python/OpenCV para captura e 
 - Modelo VASST CNN para agulhas
 - Modelo EchoNet com dados cardiacos
 - Outros plugins com datasets especificos
+
+====================================================================
+## 2025-12-22 - Sessao 11: Download Dataset Brachial Plexus
+====================================================================
+
+### Resumo
+Download do dataset Brachial Plexus com 42,321 frames REAIS de ultrassom
+com anotacoes de agulha para treinar o NEEDLE PILOT.
+
+### Dataset Baixado
+- **Local**: `/Users/priscoleao/ultrasound-needle-trainer/brachial_plexus/`
+- **Fonte**: https://github.com/Regional-US/brachial_plexus
+- **Paper**: IROS-2024 - Needle Guidance for Autonomous UGRA
+- **Arquivos**: 42,321 frames de video
+- **Maquinas**: Butterfly, Sonosite, eSaote
+
+### Estrutura do Dataset
+```
+brachial_plexus/
+├── data/
+│   ├── Butterfly/          # Frames da maquina Butterfly
+│   │   ├── ac_masks/       # Mascaras de nervos
+│   │   └── bb_annotations/ # Bounding boxes
+│   ├── Sonosite/           # Frames da maquina Sonosite
+│   │   ├── ac_masks/
+│   │   ├── bb_annotations/
+│   │   └── needle/         # ⭐ ANOTACOES DE AGULHA!
+│   │       └── needle_coordinates/  # Coordenadas da agulha
+│   └── eSaote/             # Frames da maquina eSaote
+└── README.md
+```
+
+### Decisao de Arquitetura
+Usuario escolheu abordagem HIBRIDA para datasets:
+- Datasets centralizados em `aplicativo-usg-final/datasets/`
+- Scripts de treinamento separados por plugin
+- `unified_dataset_manager.py` ja existe para gerenciar
+
+### Proximos Passos (ultrasound-needle-trainer)
+1. Criar script `process_brachial.py` para processar o dataset
+2. Treinar modelo VASST CNN com dados REAIS
+3. Copiar modelo para `aplicativo-usg-final/models/vasst_needle.pt`
+
+### Arquivos Criados/Modificados
+- `ultrasound-needle-trainer/INSTRUCOES_CONTINUIDADE.md` - Atualizado com passos
+- `ultrasound-needle-trainer/download_real_data.sh` - Script de download
+
+### Estado do Projeto
+- ✅ Dataset Brachial Plexus baixado (42,321 frames)
+- ✅ Documentacao atualizada com proximos passos
+- ⏳ Pendente: Processar dataset e treinar com dados reais
