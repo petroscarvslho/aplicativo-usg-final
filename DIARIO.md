@@ -1,6 +1,22 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-22 - Sessao 18: Proximos Passos Registrados
+====================================================================
+
+### Resumo
+Registro dos proximos passos recomendados na continuidade, alinhados
+com a ordem atual de melhoria dos plugins.
+
+### Melhorias Principais
+1. **FAST**: gating por SCAN Q + opcional auto-check de janela
+2. **LUNG/BLADDER/CARDIAC**: refino de overlays e criterios
+3. **Treino/Datasets**: revisar mudancas locais antes de commitar
+
+### Arquivos Modificados
+- `INSTRUCOES_CONTINUIDADE.md` - Proximos passos recomendados
+
+====================================================================
 ## 2025-12-22 - Sessao 17: Passo a Passo de Continuidade
 ====================================================================
 

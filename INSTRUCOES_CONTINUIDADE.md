@@ -241,6 +241,11 @@ Arquivos de pesquisa em:
 - Repo local com alteracoes nao commitadas em `datasets/unified_dataset_manager.py`,
   `training/train_unified.py`, `datasets/unified/` e `training/checkpoints/` (revisar antes de commitar).
 
+### Proximos passos recomendados (ordem sugerida)
+1. FAST: usar SCAN Q como gating para reduzir falso positivo + opcional auto-check de janela.
+2. LUNG/BLADDER/CARDIAC: refinar overlays e criterios de qualidade/estabilidade.
+3. Revisar mudancas locais de treino/datasets antes de commitar.
+
 ====================================================================
 ## PROJETOS RELACIONADOS
 ====================================================================
