@@ -1,6 +1,23 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-22 - Sessao 15: CARDIAC AI - AutoEF (Fallback CV)
+====================================================================
+
+### Resumo
+Melhoria do fallback CV cardiaco com segmentacao mais robusta do LV e
+EF calculada de forma mais estavel.
+
+### Melhorias Principais
+1. **Threshold adaptativo** por percentil e suavizacao do ROI
+2. **Score de contorno** (contraste, area, solidez, circularidade, centro)
+3. **EF por percentis** (P90/P10) com suavizacao temporal
+4. **HR com FPS configuravel** e ciclos mais estaveis
+
+### Arquivos Modificados
+- `src/ai_processor.py` - Fallback CV do CARDIAC com AutoEF melhorado
+
+====================================================================
 ## 2025-12-22 - Sessao 14: BLADDER AI - Dual View + Qualidade
 ====================================================================
 

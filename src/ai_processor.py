@@ -873,6 +873,7 @@ class AIProcessor:
         # Aplicar CLAHE para melhorar contraste em regiões escuras
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
+        enhanced = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
         # Detectar edges
         edges = cv2.Canny(enhanced, 50, 150, apertureSize=3)
@@ -2465,7 +2466,9 @@ class AIProcessor:
                 print(f"Erro EchoNet: {e}")
 
         # Fallback CV: detectar estrutura escura grande (cavidade)
-        _, thresh = cv2.threshold(roi, 50, 255, cv2.THRESH_BINARY_INV)
+        roi_mean = float(np.mean(roi)) if roi.size else 0.0
+        thresh_val = int(np.clip(np.percentile(roi, 20), 20, 80)) if roi.size else 50
+        _, thresh = cv2.threshold(roi, thresh_val, 255, cv2.THRESH_BINARY_INV)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
@@ -2473,20 +2476,55 @@ class AIProcessor:
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if contours:
-            # Encontrar contorno mais circular e grande
+            # Encontrar contorno mais provavel (grande, eliptico e centrado)
             best_contour = None
-            best_score = 0
+            best_score = 0.0
+            roi_area = max(1.0, roi.shape[0] * roi.shape[1])
+            roi_cx = roi.shape[1] / 2.0
+            roi_cy = roi.shape[0] / 2.0
 
             for cnt in contours:
                 area = cv2.contourArea(cnt)
-                if area > 1000:
-                    perimeter = cv2.arcLength(cnt, True)
-                    if perimeter > 0:
-                        circularity = 4 * np.pi * area / (perimeter ** 2)
-                        score = area * circularity
-                        if score > best_score:
-                            best_score = score
-                            best_contour = cnt
+                if area < roi_area * 0.02 or area > roi_area * 0.6:
+                    continue
+
+                perimeter = cv2.arcLength(cnt, True)
+                circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else 0.0
+
+                hull = cv2.convexHull(cnt)
+                hull_area = cv2.contourArea(hull)
+                solidity = area / hull_area if hull_area > 0 else 0.0
+
+                M = cv2.moments(cnt)
+                if M["m00"] == 0:
+                    continue
+                cx = M["m10"] / M["m00"]
+                cy = M["m01"] / M["m00"]
+
+                center_dist = ((cx - roi_cx) ** 2 + (cy - roi_cy) ** 2) ** 0.5
+                center_score = 1.0 - min(center_dist / (0.6 * max(roi.shape)), 1.0)
+
+                mask = np.zeros_like(roi, dtype=np.uint8)
+                cv2.drawContours(mask, [cnt], -1, 255, -1)
+                mean_inside = cv2.mean(roi, mask=mask)[0]
+                contrast = max(0.0, roi_mean - mean_inside)
+
+                area_score = min(area / (0.25 * roi_area), 1.0)
+                circ_score = min(max((circularity - 0.25) / 0.55, 0.0), 1.0)
+                solidity_score = min(max((solidity - 0.65) / 0.35, 0.0), 1.0)
+                contrast_score = min(contrast / 50.0, 1.0)
+
+                score = (
+                    0.35 * contrast_score
+                    + 0.25 * area_score
+                    + 0.2 * solidity_score
+                    + 0.1 * circ_score
+                    + 0.1 * center_score
+                )
+
+                if score > best_score:
+                    best_score = score
+                    best_contour = cnt
 
             if best_contour is not None:
                 # Ajustar coordenadas para frame completo
@@ -2499,25 +2537,32 @@ class AIProcessor:
                     lv_center = (int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"]))
 
         # Tracking temporal para detectar ciclo cardiaco
-        self.cardiac_history.append(lv_area)
+        if lv_area > 0:
+            self.cardiac_history.append(lv_area)
+        elif self.cardiac_history:
+            self.cardiac_history.append(self.cardiac_history[-1])
 
         # Calcular metricas a partir do historico
         if len(self.cardiac_history) >= 30:
-            areas = list(self.cardiac_history)
-            max_area = max(areas)
-            min_area = min(areas) if min(areas) > 0 else 1
+            areas = np.array(self.cardiac_history, dtype=np.float32)
+            max_area = float(np.percentile(areas, 90))
+            min_area = float(np.percentile(areas, 10))
+            max_area = max(max_area, 1.0)
+            min_area = max(min_area, 1.0)
 
             # EF baseado na variacao de area (aproximacao 2D)
+            # Simpson simplificado: EF ≈ (EDV - ESV) / EDV
+            ef_calc = ((max_area - min_area) / max_area) * 100 if max_area > 0 else 55
+            ef_calc = np.clip(ef_calc * 1.2, 25, 80)
             if self.cardiac_ef is None:
-                # Simpson simplificado: EF ≈ (EDV - ESV) / EDV
-                ef_calc = ((max_area - min_area) / max_area) * 100 if max_area > 0 else 55
-                self.cardiac_ef = np.clip(ef_calc * 1.2, 30, 75)  # Ajuste de escala
+                self.cardiac_ef = ef_calc
+            else:
+                self.cardiac_ef = 0.85 * self.cardiac_ef + 0.15 * ef_calc
 
             # Volumes estimados (px^2 para ml usando formula elipsoidal)
             px_to_mm = 0.3
-            if self.cardiac_edv is None:
-                self.cardiac_edv = (max_area * px_to_mm**2) * 0.85 / 1000 * 150  # Escala para ml
-                self.cardiac_esv = (min_area * px_to_mm**2) * 0.85 / 1000 * 150
+            self.cardiac_edv = (max_area * px_to_mm**2) * 0.85 / 1000 * 150  # Escala para ml
+            self.cardiac_esv = (min_area * px_to_mm**2) * 0.85 / 1000 * 150
 
             # Detectar picos para HR
             if len(areas) >= 30:
@@ -2533,7 +2578,8 @@ class AIProcessor:
                     intervals = np.diff(self.cardiac_cycle_frames[-5:])
                     if len(intervals) > 0:
                         avg_interval = np.mean(intervals)
-                        self.cardiac_hr = int(60 * 30 / avg_interval)  # Assumindo ~30fps
+                        fps = getattr(config, 'FPS', 30)
+                        self.cardiac_hr = int(60 * fps / avg_interval)
                         self.cardiac_hr = np.clip(self.cardiac_hr, 40, 150)
 
             # GLS estimado (tipicamente -15 a -25 em normais)
