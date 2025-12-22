@@ -1,6 +1,26 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-22 - Sessao 19: Commit Geral (datasets/checkpoints)
+====================================================================
+
+### Resumo
+Commit de todas as alteracoes pendentes no repo, incluindo ajustes de
+validacao no dataset manager, robustez no loader de checkpoint e
+inclusao de datasets/checkpoints locais.
+
+### Melhorias Principais
+1. **Dataset manager**: valida imagens/labels antes de combinar
+2. **Train unified**: garante canal em imagens 2D e compatibilidade de checkpoint
+3. **Repo**: inclui `datasets/unified/` e `training/checkpoints/`
+
+### Arquivos Modificados
+- `datasets/unified_dataset_manager.py` - validacao antes de combinar
+- `training/train_unified.py` - canal 2D + load checkpoint robusto
+- `datasets/unified/` - datasets locais adicionados
+- `training/checkpoints/` - checkpoints adicionados
+
+====================================================================
 ## 2025-12-22 - Sessao 18: Proximos Passos Registrados
 ====================================================================
 

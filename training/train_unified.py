@@ -227,6 +227,8 @@ class USGDataset(Dataset):
         target_h, target_w = self.config["input_size"]
         if image.shape[0] != target_h or image.shape[1] != target_w:
             image = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            if image.ndim == 2:
+                image = np.expand_dims(image, axis=-1)
             if self.config["task"] == "segmentation":
                 label = cv2.resize(label, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
 
@@ -297,6 +299,9 @@ class USGDataset(Dataset):
         if np.random.random() > 0.7:
             noise = np.random.normal(0, 10, image.shape)
             image = np.clip(image + noise, 0, 255).astype(np.uint8)
+
+        if image.ndim == 2:
+            image = np.expand_dims(image, axis=-1)
 
         return image, label
 
@@ -952,7 +957,10 @@ def main():
 
     # Resumir treinamento
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location=device)
+        try:
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        except TypeError:
+            checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         print(f"✅ Checkpoint carregado: {args.resume}")
 

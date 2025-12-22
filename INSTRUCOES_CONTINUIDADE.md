@@ -238,8 +238,7 @@ Arquivos de pesquisa em:
 - CARDIAC AI fallback CV com AutoEF mais robusto (percentis + suavizacao).
 - Auto Gain + Scan Quality overlay integrado em FAST/LUNG/BLADDER/CARDIAC.
 - Treinamento de datasets ocorre em outro terminal (nao iniciar aqui).
-- Repo local com alteracoes nao commitadas em `datasets/unified_dataset_manager.py`,
-  `training/train_unified.py`, `datasets/unified/` e `training/checkpoints/` (revisar antes de commitar).
+- Repo inclui `datasets/unified/` e `training/checkpoints/` (grande, ~785MB).
 
 ### Proximos passos recomendados (ordem sugerida)
 1. FAST: usar SCAN Q como gating para reduzir falso positivo + opcional auto-check de janela.

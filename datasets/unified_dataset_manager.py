@@ -984,8 +984,6 @@ def combine_for_plugin(plugin: str) -> Path:
 
         if images_file.exists():
             images = np.load(images_file)
-            all_images.append(images)
-
             labels = None
             if label_source == "labels":
                 if labels_file.exists():
@@ -1001,6 +999,15 @@ def combine_for_plugin(plugin: str) -> Path:
             if labels is None:
                 continue
 
+            if images.shape[0] == 0 or images.ndim < 3:
+                print(f"   ⚠️ {dataset_dir.name}: imagens vazias/invalidas, pulando")
+                continue
+
+            if labels.shape[0] != images.shape[0]:
+                print(f"   ⚠️ {dataset_dir.name}: labels nao batem com imagens, pulando")
+                continue
+
+            all_images.append(images)
             all_labels.append(labels)
 
             sources.append((dataset_dir.name, len(images)))
