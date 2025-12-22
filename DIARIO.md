@@ -1,6 +1,26 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-22 - Sessao 16: Auto Gain + Scan Quality (FAST/LUNG/BLADDER/CARDIAC)
+====================================================================
+
+### Resumo
+Auto gain e score de qualidade para estabilizar analise CV em modo real-time,
+com overlay padronizado de SCAN Q nos principais plugins clinicos.
+
+### Melhorias Principais
+1. **Auto gain analitico** (media/percentis) antes do pipeline CV
+2. **Score de qualidade** (contraste, nitidez, exposicao, saturacao)
+3. **Integracao em FAST/LUNG/BLADDER/CARDIAC** sem alterar o frame exibido
+4. **Overlay padrao** "AUTO GAIN +% / SCAN Q %" no canto superior
+5. **Safeguard no BLADDER**: inicializacao de `best_score` para uso com modelo treinado
+6. **REFERENCIAS.md** expandido com papers FAST/eFAST e IQA
+
+### Arquivos Modificados
+- `src/ai_processor.py` - Auto gain + scan quality overlay
+- `REFERENCIAS.md` - Novas referencias FAST/eFAST e IQA
+
+====================================================================
 ## 2025-12-22 - Sessao 15: CARDIAC AI - AutoEF (Fallback CV)
 ====================================================================
 

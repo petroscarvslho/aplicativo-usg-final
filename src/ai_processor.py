@@ -1558,6 +1558,66 @@ class AIProcessor:
         scaled = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
         return scaled, scale
 
+    def _auto_gain_and_quality(self, gray, roi=None):
+        """Aplica auto gain (apenas para processamento) e calcula score de qualidade."""
+        h, w = gray.shape[:2]
+        if roi:
+            x0, y0, x1, y1 = roi
+            x0 = max(0, min(w - 1, x0))
+            x1 = max(1, min(w, x1))
+            y0 = max(0, min(h - 1, y0))
+            y1 = max(1, min(h, y1))
+            region = gray[y0:y1, x0:x1]
+        else:
+            region = gray
+
+        if region.size == 0:
+            region = gray
+
+        # Reduzir custo em regioes grandes
+        if region.shape[0] > 360 or region.shape[1] > 360:
+            region = cv2.resize(region, (min(360, region.shape[1]), min(360, region.shape[0])),
+                                interpolation=cv2.INTER_AREA)
+
+        mean = float(np.mean(region))
+        p10, p90 = np.percentile(region, [10, 90])
+        contrast = float(p90 - p10)
+        sharpness = float(cv2.Laplacian(region, cv2.CV_64F).var())
+        dark_pct = float(np.mean(region < 20))
+        bright_pct = float(np.mean(region > 235))
+
+        contrast_score = np.clip((contrast - 30.0) / 80.0, 0.0, 1.0)
+        sharpness_score = np.clip((sharpness - 50.0) / 200.0, 0.0, 1.0)
+        exposure_score = 1.0 - np.clip(abs(mean - 110.0) / 110.0, 0.0, 1.0)
+        saturation_penalty = np.clip((dark_pct + bright_pct) / 0.2, 0.0, 1.0)
+
+        quality = 100.0 * (
+            0.35 * contrast_score
+            + 0.35 * sharpness_score
+            + 0.2 * exposure_score
+            + 0.1 * (1.0 - saturation_penalty)
+        )
+        quality = float(np.clip(quality, 0.0, 100.0))
+
+        gain = 110.0 / (mean + 1e-6)
+        gain = float(np.clip(gain, 0.75, 1.35))
+        tuned = np.clip(gray.astype(np.float32) * gain, 0, 255).astype(np.uint8)
+
+        info = {
+            'gain': gain,
+            'quality': quality,
+        }
+        return tuned, info
+
+    def _draw_auto_gain_status(self, output, x, y, gain_info, color=(180, 180, 180)):
+        if not gain_info:
+            return
+        gain_pct = int((gain_info['gain'] - 1.0) * 100)
+        quality = int(gain_info['quality'])
+        text = f"AUTO GAIN {gain_pct:+d}%  SCAN Q {quality}%"
+        cv2.putText(output, text, (x, y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.32, color, 1, cv2.LINE_AA)
+
     # =========================================================================
     # PROCESSADORES POR MODO
     # =========================================================================
@@ -2164,8 +2224,11 @@ class AIProcessor:
         # ═══════════════════════════════════════════════════════════════════════
         # Deteccao por CV (circulos) - Fallback básico
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gain_roi = (int(w * 0.1), int(h * 0.1), int(w * 0.9), int(h * 0.9))
+        tuned, gain_info = self._auto_gain_and_quality(gray, roi=gain_roi)
+
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
+        enhanced = clahe.apply(tuned)
         enhanced = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
         now = time.time()
@@ -2435,12 +2498,15 @@ class AIProcessor:
 
         # Detectar contorno do ventriculo esquerdo
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
 
         # Regiao de interesse central (onde tipicamente esta o coracao)
         roi_margin_x = int(w * 0.15)
         roi_margin_y = int(h * 0.1)
+        roi_coords = (roi_margin_x, roi_margin_y, w - roi_margin_x, h - roi_margin_y)
+        tuned, gain_info = self._auto_gain_and_quality(gray, roi=roi_coords)
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(tuned)
         roi = enhanced[roi_margin_y:h-roi_margin_y, roi_margin_x:w-roi_margin_x]
 
         lv_contour = None
@@ -2792,6 +2858,8 @@ class AIProcessor:
             cv2.putText(output, name, (legend_x + 45, cy),
                        cv2.FONT_HERSHEY_DUPLEX, 0.25, (120, 120, 140), 1, cv2.LINE_AA)
 
+        self._draw_auto_gain_status(output, 20, 60, gain_info, color=(180, 130, 130))
+
         return output
 
     def _process_fast(self, frame):
@@ -2808,9 +2876,6 @@ class AIProcessor:
         # ═══════════════════════════════════════
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        enhanced = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
         # ROI suave por janela (usado para threshold/score, nao restringe detecao)
         roi_map = {
@@ -2824,6 +2889,12 @@ class AIProcessor:
         y0 = max(0, int(h * ry))
         x1 = min(w, int(w * (rx + rw)))
         y1 = min(h, int(h * (ry + rh)))
+        tuned, gain_info = self._auto_gain_and_quality(gray, roi=(x0, y0, x1, y1))
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(tuned)
+        enhanced = cv2.GaussianBlur(enhanced, (5, 5), 0)
+
         roi = enhanced[y0:y1, x0:x1]
         if roi.size == 0:
             roi = enhanced
@@ -3138,6 +3209,8 @@ class AIProcessor:
                          (0, 150, 255), 2)
             cv2.putText(output, "FLUID DETECTED", (w//2 - 65, alert_y + 20),
                        cv2.FONT_HERSHEY_DUPLEX, 0.45, (100, 200, 255), 1, cv2.LINE_AA)
+
+        self._draw_auto_gain_status(output, 20, 60, gain_info, color=(200, 190, 130))
 
         return output
 
@@ -3917,8 +3990,15 @@ class AIProcessor:
         h, w = frame.shape[:2]
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        rx0, ry0, rw, rh = 0.15, 0.35, 0.7, 0.55
+        x0 = int(w * rx0)
+        y0 = int(h * ry0)
+        x1 = int(w * (rx0 + rw))
+        y1 = int(h * (ry0 + rh))
+        tuned, gain_info = self._auto_gain_and_quality(gray, roi=(x0, y0, x1, y1))
+
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
+        enhanced = clahe.apply(tuned)
 
         # ═══════════════════════════════════════
         # DETECCAO DA LINHA PLEURAL
@@ -4266,6 +4346,8 @@ class AIProcessor:
             cv2.putText(output, name, (legend_x + 30, iy),
                        cv2.FONT_HERSHEY_DUPLEX, 0.25, color, 1, cv2.LINE_AA)
 
+        self._draw_auto_gain_status(output, 20, 60, gain_info, color=(170, 200, 140))
+
         return output
 
     def _process_bladder(self, frame):
@@ -4278,6 +4360,7 @@ class AIProcessor:
         mask_found = False
         contour_to_draw = None
         bladder_center = None
+        best_score = 0.0
 
         # ═══════════════════════════════════════
         # DETECCAO DA BEXIGA
@@ -4317,11 +4400,6 @@ class AIProcessor:
         # Fallback CV
         if not mask_found:
             # Bexiga tipicamente anecoica (escura) - threshold adaptativo em ROI
-            rx0, ry0, rw, rh = 0.15, 0.35, 0.7, 0.55
-            x0 = int(w * rx0)
-            y0 = int(h * ry0)
-            x1 = int(w * (rx0 + rw))
-            y1 = int(h * (ry0 + rh))
             roi = enhanced[y0:y1, x0:x1]
             if roi.size == 0:
                 roi = enhanced
@@ -4677,6 +4755,8 @@ class AIProcessor:
         cv2.line(output, (legend_x + 10, legend_y + 42), (legend_x + 35, legend_y + 42), (100, 200, 255), 2)
         cv2.putText(output, "D2 (Height)", (legend_x + 40, legend_y + 46),
                    cv2.FONT_HERSHEY_DUPLEX, 0.25, (100, 200, 255), 1, cv2.LINE_AA)
+
+        self._draw_auto_gain_status(output, 20, 60, gain_info, color=(200, 160, 220))
 
         return output
 

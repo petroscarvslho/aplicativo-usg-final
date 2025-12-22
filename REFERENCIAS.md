@@ -171,10 +171,21 @@
 
 ## Papers e whitepapers utilitarios (FAST, B-lines, EF, Bladder)
 - Deep learning free fluid (FAST/Morrison): https://www.frontiersin.org/journals/medicine/articles/10.3389/fmed.2021.707437/full
+- Hemoperitoneum on FAST (DL, J Digital Imaging 2023): https://www.semanticscholar.org/paper/a897a0e2008c56a1444809eae6ff5eb2a8f47c30
+- Pericardial effusion (POCUS DL, MBEC 2023): https://www.semanticscholar.org/paper/3acce786967a514fc7ab290c7ad681ef18e33eed
+- FAST view classification (pediatric, 2020 medRxiv): https://www.semanticscholar.org/paper/2359305dca3bc0d3891fb6bd3712d9837682f578
+- FAST view classification (pediatric, JUM 2021): https://www.semanticscholar.org/paper/787d4823b96a8383be8a1469482c247c5f6a6a7e
+- RUQ sensitivity for free fluid (WJEM 2017): https://www.semanticscholar.org/paper/f58a8f8af750c2ee0f748f2d4eec7a9aa8ce34ad
+- FAST exam overview (StatPearls/NCBI): https://www.ncbi.nlm.nih.gov/books/NBK470312/
 - B-lines reliability: https://pubmed.ncbi.nlm.nih.gov/23269716/
 - Lung US review: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7929643/
 - Auto B-lines FDA clearance (Butterfly): https://www.butterflynetwork.com/press-releases/fda-clearance-butterfly-auto-b-lines-ai-tool
 - Bladder US practice evidence: https://pubmed.ncbi.nlm.nih.gov/37721338/
+
+## Qualidade de imagem / Scan Quality Score (IQA)
+- Bladder US quality assessment (IEEE TUFFC 2024): https://www.semanticscholar.org/paper/1b8ed2f382af08a97ddb9abd0e072f4d7926c426
+- Expert-agnostic US IQA (ICRA 2023): https://www.semanticscholar.org/paper/4a725ae21274dade1cf6f2196798018ca8e3d4b3
+- High-frequency US IQA dataset (2022): https://www.semanticscholar.org/paper/5a9fefe7b78068c61b87bbf5c60dd2d26a8bb2cd
 
 ---
 
@@ -195,6 +206,7 @@
 - Ultrasound segmentation: https://github.com/luke-ck/ultrasound-segmentation
 - UltraSAM (foundation model US): https://github.com/CAMMA-public/UltraSam
 - POCUS COVID dataset code: https://github.com/jannisborn/covid19_ultrasound
+- Ultrasound optimal view detection: https://github.com/nistring/Ultrasound-Optimal-View-Detection
 
 ---
 

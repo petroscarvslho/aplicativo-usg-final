@@ -199,7 +199,7 @@ Arquivos de pesquisa em:
 ## ESTADO ATUAL DO PROJETO (ATUALIZAR A CADA SESSAO)
 ====================================================================
 
-### Ultima atualizacao: 2025-12-22 (Sessao 15)
+### Ultima atualizacao: 2025-12-22 (Sessao 16)
 
 - Registro central `plugin_registry.py` com nomes de pesos, formatos de label e modelos por plugin.
 - Unified dataset manager expandido (FAST/ANATOMY/BLADDER/LUNG) + novos sinteticos (bladder/lung/fast).
@@ -209,9 +209,11 @@ Arquivos de pesquisa em:
 - VASST no app agora le metadata e suporta label order/scale automaticamente.
 - REFERENCIAS.md expandido com pesquisa externa (apps pagos, AI comerciais,
   papers/whitepapers, datasets, repos GitHub e threads do Reddit).
+- REFERENCIAS.md ampliado com FAST/eFAST (DL + view classification) e IQA (scan quality).
 - LUNG AI fallback CV com Auto B-lines (densidade + clusters) e pleura_y suavizado.
 - BLADDER AI fallback CV com dual-view (sag/trans), score de qualidade e suavizacao.
 - CARDIAC AI fallback CV com AutoEF mais robusto (percentis + suavizacao).
+- Auto Gain + Scan Quality overlay integrado em FAST/LUNG/BLADDER/CARDIAC.
 
 ====================================================================
 ## PROJETOS RELACIONADOS
