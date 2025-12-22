@@ -22,6 +22,7 @@ import os
 import sys
 import json
 import argparse
+import copy
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
@@ -29,6 +30,7 @@ import numpy as np
 
 # Adicionar diretório pai ao path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from plugin_registry import get_model_spec
 
 # =============================================================================
 # CONFIGURAÇÃO
@@ -96,6 +98,56 @@ PLUGIN_CONFIGS = {
 }
 
 
+def resolve_config(plugin: str, model_key: Optional[str] = None) -> Tuple[Dict, Dict]:
+    """
+    Resolve configuracao dinamica com base no plugin_registry.
+    Retorna (model_spec, config) para treino.
+    """
+    model_spec = get_model_spec(plugin, model_key)
+    if not model_spec:
+        raise ValueError(f"Plugin/modelo desconhecido: {plugin}/{model_key}")
+
+    task = model_spec["task"]
+    label_type = model_spec.get("label_type")
+
+    if task == "regression":
+        if label_type == "ef_esv_edv":
+            output_dim = 3
+        else:
+            output_dim = 2
+        loss = "mae"
+        metrics = ["mae", "euclidean_distance"]
+    elif task == "segmentation":
+        output_dim = None
+        loss = "cross_entropy"
+        metrics = ["dice", "iou"]
+    elif task == "classification":
+        output_dim = None
+        loss = "cross_entropy"
+        metrics = ["accuracy", "f1"]
+    else:
+        output_dim = None
+        loss = "mse"
+        metrics = []
+
+    config = {
+        "task": task,
+        "output_dim": output_dim,
+        "loss": loss,
+        "metrics": metrics,
+        "model": model_spec.get("arch"),
+        "input_size": model_spec.get("input_size", (256, 256)),
+        "num_classes": model_spec.get("num_classes"),
+        "label_type": label_type,
+        "label_scale": model_spec.get("label_scale"),
+        "label_order": "yx" if label_type == "point_yx" else None,
+        "channels": model_spec.get("channels", 1),
+        "expected_path": model_spec.get("expected_path"),
+    }
+
+    return model_spec, config
+
+
 # =============================================================================
 # IMPORTS PYTORCH (com fallback)
 # =============================================================================
@@ -138,12 +190,13 @@ class USGDataset(Dataset):
         plugin: str,
         split: str = "train",
         augment: bool = True,
-        data_dir: Path = None
+        data_dir: Path = None,
+        config: Dict = None
     ):
         self.plugin = plugin.upper()
         self.split = split
         self.augment = augment and (split == "train")
-        self.config = PLUGIN_CONFIGS[self.plugin]
+        self.config = config or PLUGIN_CONFIGS[self.plugin]
 
         # Carregar dados
         data_dir = data_dir or DATASETS_DIR / plugin.lower()
@@ -170,6 +223,20 @@ class USGDataset(Dataset):
         if image.ndim == 2:
             image = np.expand_dims(image, axis=-1)
 
+        # Redimensionar para input_size
+        target_h, target_w = self.config["input_size"]
+        if image.shape[0] != target_h or image.shape[1] != target_w:
+            image = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            if self.config["task"] == "segmentation":
+                label = cv2.resize(label, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+
+        # Ajustar canais
+        if self.config.get("channels", 1) == 3 and image.shape[2] == 1:
+            image = np.repeat(image, 3, axis=2)
+        elif self.config.get("channels", 1) == 1 and image.shape[2] == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            image = np.expand_dims(image, axis=-1)
+
         # Augmentação
         if self.augment:
             image, label = self._augment(image, label)
@@ -181,7 +248,10 @@ class USGDataset(Dataset):
         image = torch.from_numpy(image).permute(2, 0, 1)  # HWC -> CHW
 
         if self.config["task"] == "regression":
-            label = torch.from_numpy(label.astype(np.float32))
+            label = label.astype(np.float32)
+            if self.config.get("label_scale") == "neg1_1":
+                label = label * 2.0 - 1.0
+            label = torch.from_numpy(label)
         elif self.config["task"] == "segmentation":
             label = torch.from_numpy(label.astype(np.int64))
         elif self.config["task"] == "classification":
@@ -335,66 +405,80 @@ class UNetPP(nn.Module):
         return self.final(x)
 
 
-class VASST(nn.Module):
-    """VASST-like CNN para detecção de agulha"""
-    def __init__(self, in_channels=1, output_dim=2):
+class VASSTPyTorch(nn.Module):
+    """VASST CNN compatível com a inferência do app"""
+    def __init__(self, input_shape: Tuple[int, int] = (256, 256)):
         super().__init__()
-        self.features = nn.Sequential(
-            # Block 1
-            nn.Conv2d(in_channels, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
+        self.input_shape = input_shape
 
-            # Block 2
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
+        self.conv0 = nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(16, 32, kernel_size=2, stride=1, padding=0)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=2, stride=1, padding=0)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=2, stride=1, padding=0)
+        self.conv4 = nn.Conv2d(128, 256, kernel_size=2, stride=1, padding=0)
 
-            # Block 3
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
+        self.pool = nn.MaxPool2d(2, 2)
+        self.leaky = nn.LeakyReLU(0.01)
 
-            # Block 4
-            nn.Conv2d(128, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
-        )
+        self._calculate_flatten_size()
 
-        self.attention = CBAM(256)
+        self.fc0 = nn.Linear(self.flatten_size, 1024)
+        self.fc1 = nn.Linear(1024, 128)
+        self.fc2 = nn.Linear(128, 16)
+        self.output = nn.Linear(16, 2)
 
-        self.regressor = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(256, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(128, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, output_dim),
-            nn.Sigmoid(),  # Output em [0, 1]
-        )
+    def _calculate_flatten_size(self):
+        x = torch.zeros(1, 1, self.input_shape[0], self.input_shape[1])
+        x = self.pool(self.leaky(self.conv0(x)))
+        x = self.pool(self.leaky(self.conv1(x)))
+        x = self.pool(self.leaky(self.conv2(x)))
+        x = self.pool(self.leaky(self.conv3(x)))
+        x = self.pool(self.leaky(self.conv4(x)))
+        self.flatten_size = x.view(1, -1).size(1)
 
     def forward(self, x):
-        x = self.features(x)
-        x = self.attention(x)
-        return self.regressor(x)
+        x = self.pool(self.leaky(self.conv0(x)))
+        x = self.pool(self.leaky(self.conv1(x)))
+        x = self.pool(self.leaky(self.conv2(x)))
+        x = self.pool(self.leaky(self.conv3(x)))
+        x = self.pool(self.leaky(self.conv4(x)))
+        x = x.view(x.size(0), -1)
+        x = self.leaky(self.fc0(x))
+        x = self.leaky(self.fc1(x))
+        x = self.leaky(self.fc2(x))
+        return self.output(x)
+
+
+class EchoNetRegression(nn.Module):
+    """EchoNet-like regression para EF/ESV/EDV (compatível com inferência)."""
+    def __init__(self):
+        super().__init__()
+        import torchvision.models as models
+
+        resnet = models.resnet18(weights=None)
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
+        self.layer1 = resnet.layer1
+        self.layer2 = resnet.layer2
+        self.layer3 = resnet.layer3
+        self.layer4 = resnet.layer4
+        self.avgpool = resnet.avgpool
+        self.fc = nn.Linear(512, 3)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        return self.fc(x)
 
 
 class EfficientNetClassifier(nn.Module):
@@ -427,18 +511,51 @@ class EfficientNetClassifier(nn.Module):
         return self.classifier(x)
 
 
-def create_model(plugin: str, device: str = 'cpu') -> nn.Module:
-    """Cria modelo para o plugin especificado"""
-    config = PLUGIN_CONFIGS[plugin.upper()]
+def create_model(config: Dict, device: str = "cpu") -> nn.Module:
+    """Cria modelo para o plugin especificado com base no registry."""
+    arch = config["model"]
 
-    if config["model"] == "unetpp":
-        model = UNetPP(in_channels=1, num_classes=config["num_classes"])
-    elif config["model"] == "vasst":
-        model = VASST(in_channels=1, output_dim=config["output_dim"])
-    elif config["model"] == "efficientnet":
-        model = EfficientNetClassifier(in_channels=1, num_classes=config["num_classes"])
+    if arch == "smp_unet":
+        try:
+            import segmentation_models_pytorch as smp
+            model = smp.Unet(
+                encoder_name="resnet34",
+                encoder_weights=None,
+                in_channels=config.get("channels", 1),
+                classes=config.get("num_classes", 2),
+                activation=None,
+            )
+        except ImportError as e:
+            raise RuntimeError("segmentation_models_pytorch nao instalado") from e
+    elif arch == "vasst":
+        model = VASSTPyTorch(input_shape=config.get("input_size", (256, 256)))
+    elif arch == "echonet":
+        model = EchoNetRegression()
+    elif arch == "efficientnet":
+        model = EfficientNetClassifier(
+            in_channels=config.get("channels", 1),
+            num_classes=config.get("num_classes", 4),
+        )
+    elif arch == "nerve_track":
+        try:
+            from nerve_track.nerve_model import NerveSegmentationModel
+            base_model = NerveSegmentationModel(
+                num_classes=config.get("num_classes", 6),
+                use_temporal=True,
+            )
+            class _Wrapper(nn.Module):
+                def __init__(self, inner: nn.Module):
+                    super().__init__()
+                    self.inner = inner
+
+                def forward(self, x):
+                    return self.inner(x)["logits"]
+
+            model = _Wrapper(base_model)
+        except Exception as e:
+            raise RuntimeError(f"NerveTrack model indisponivel: {e}") from e
     else:
-        raise ValueError(f"Modelo desconhecido: {config['model']}")
+        raise ValueError(f"Modelo desconhecido: {arch}")
 
     return model.to(device)
 
@@ -492,28 +609,30 @@ class DiceFocalLoss(nn.Module):
                self.focal_weight * self.focal(pred, target)
 
 
-def create_loss(plugin: str) -> nn.Module:
+def create_loss(config: Dict) -> nn.Module:
     """Cria função de loss para o plugin"""
-    config = PLUGIN_CONFIGS[plugin.upper()]
+    loss = config.get("loss", "mae")
 
-    if config["loss"] == "mse":
+    if loss == "mse":
         return nn.MSELoss()
-    elif config["loss"] == "dice_focal":
+    if loss == "mae":
+        return nn.L1Loss()
+    if loss == "dice_focal":
         return DiceFocalLoss()
-    elif config["loss"] == "cross_entropy":
+    if loss == "cross_entropy":
         return nn.CrossEntropyLoss()
-    else:
-        raise ValueError(f"Loss desconhecida: {config['loss']}")
+    if loss == "bce":
+        return nn.BCEWithLogitsLoss()
+    raise ValueError(f"Loss desconhecida: {loss}")
 
 
 # =============================================================================
 # MÉTRICAS
 # =============================================================================
 
-def compute_metrics(pred, target, plugin: str) -> Dict[str, float]:
+def compute_metrics(pred, target, config: Dict) -> Dict[str, float]:
     """Calcula métricas para o plugin"""
-    config = PLUGIN_CONFIGS[plugin.upper()]
-    metrics = {}
+    metrics: Dict[str, float] = {}
 
     if config["task"] == "regression":
         pred_np = pred.detach().cpu().numpy()
@@ -522,9 +641,11 @@ def compute_metrics(pred, target, plugin: str) -> Dict[str, float]:
         # MAE
         metrics["mae"] = np.mean(np.abs(pred_np - target_np))
 
-        # Distância euclidiana (em pixels)
-        dist = np.sqrt(np.sum((pred_np - target_np) ** 2, axis=1))
-        metrics["euclidean_distance"] = np.mean(dist) * 256  # Converter para pixels
+        # Distância euclidiana
+        if pred_np.shape[1] == 2:
+            dist = np.sqrt(np.sum((pred_np - target_np) ** 2, axis=1))
+            pixel_scale = config.get("input_size", (256, 256))[0]
+            metrics["euclidean_distance"] = np.mean(dist) * pixel_scale
 
     elif config["task"] == "segmentation":
         pred_np = pred.argmax(dim=1).detach().cpu().numpy()
@@ -570,16 +691,17 @@ class Trainer:
         plugin: str,
         model: nn.Module,
         device: str,
+        config: Dict,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-5,
     ):
         self.plugin = plugin.upper()
         self.model = model
         self.device = device
-        self.config = PLUGIN_CONFIGS[self.plugin]
+        self.config = config
 
         # Loss e otimizador
-        self.criterion = create_loss(plugin)
+        self.criterion = create_loss(config)
         self.optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
         # Histórico
@@ -592,6 +714,7 @@ class Trainer:
 
         self.best_val_loss = float('inf')
         self.patience_counter = 0
+        self.best_state_dict = None
 
     def train_epoch(self, dataloader: DataLoader) -> Tuple[float, Dict]:
         """Treina uma época"""
@@ -618,7 +741,7 @@ class Trainer:
         avg_loss = total_loss / len(dataloader)
         all_preds = torch.cat(all_preds, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        metrics = compute_metrics(all_preds, all_targets, self.plugin)
+        metrics = compute_metrics(all_preds, all_targets, self.config)
 
         return avg_loss, metrics
 
@@ -644,7 +767,7 @@ class Trainer:
         avg_loss = total_loss / len(dataloader)
         all_preds = torch.cat(all_preds, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        metrics = compute_metrics(all_preds, all_targets, self.plugin)
+        metrics = compute_metrics(all_preds, all_targets, self.config)
 
         return avg_loss, metrics
 
@@ -655,6 +778,7 @@ class Trainer:
         epochs: int,
         patience: int = 10,
         save_dir: Path = None,
+        export_path: Optional[str] = None,
     ):
         """Loop de treinamento completo"""
         save_dir = save_dir or CHECKPOINTS_DIR / self.plugin.lower()
@@ -707,6 +831,7 @@ class Trainer:
                     "config": self.config,
                 }
                 torch.save(checkpoint, save_dir / "best_model.pth")
+                self.best_state_dict = copy.deepcopy(self.model.state_dict())
                 print(f"   ✅ Melhor modelo salvo! (loss: {val_loss:.4f})")
             else:
                 self.patience_counter += 1
@@ -720,6 +845,28 @@ class Trainer:
 
         # Salvar modelo final
         torch.save(self.model.state_dict(), save_dir / "final_model.pth")
+
+        # Export para inferência (state_dict + metadata)
+        if export_path:
+            export_path = Path(export_path)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            state_dict = self.best_state_dict or self.model.state_dict()
+            torch.save(state_dict, export_path)
+
+            meta = {
+                "plugin": self.plugin,
+                "task": self.config.get("task"),
+                "label_type": self.config.get("label_type"),
+                "label_scale": self.config.get("label_scale"),
+                "label_order": self.config.get("label_order"),
+                "input_size": self.config.get("input_size"),
+                "num_classes": self.config.get("num_classes"),
+                "exported_at": datetime.now().isoformat(),
+            }
+            meta_path = export_path.with_suffix(".meta.json")
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+            print(f"   Exportado para inferência: {export_path}")
 
         print(f"\n{'='*60}")
         print(f"✅ TREINAMENTO CONCLUÍDO!")
@@ -746,6 +893,7 @@ def main():
     parser.add_argument("--device", type=str, default="auto", help="Device (cpu/cuda/mps/auto)")
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint para resumir")
     parser.add_argument("--data_dir", type=str, default=None, help="Diretório de dados")
+    parser.add_argument("--model", type=str, default=None, help="Modelo especifico do plugin")
 
     args = parser.parse_args()
 
@@ -762,12 +910,31 @@ def main():
 
     print(f"\n🖥️ Usando dispositivo: {device}")
 
+    # Config e validação
+    model_spec, config = resolve_config(args.plugin, args.model)
+    if config["task"] == "detection":
+        print("\n❌ Este treinamento nao suporta deteccao (YOLO).")
+        print("   Use: python training/train_yolo.py --plugin FAST/NEEDLE")
+        return
+
     # Carregar dados
     data_dir = Path(args.data_dir) if args.data_dir else DATASETS_DIR / args.plugin.lower()
 
     try:
-        train_dataset = USGDataset(args.plugin, "train", augment=True, data_dir=data_dir)
-        val_dataset = USGDataset(args.plugin, "val", augment=False, data_dir=data_dir)
+        train_dataset = USGDataset(
+            args.plugin,
+            "train",
+            augment=True,
+            data_dir=data_dir,
+            config=config,
+        )
+        val_dataset = USGDataset(
+            args.plugin,
+            "val",
+            augment=False,
+            data_dir=data_dir,
+            config=config,
+        )
     except FileNotFoundError as e:
         print(f"\n❌ ERRO: {e}")
         print(f"\nPara treinar o plugin {args.plugin}, primeiro execute:")
@@ -779,8 +946,8 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     # Criar modelo
-    model = create_model(args.plugin, device)
-    print(f"\n📦 Modelo criado: {PLUGIN_CONFIGS[args.plugin]['model']}")
+    model = create_model(config, device)
+    print(f"\n📦 Modelo criado: {config['model']}")
     print(f"   Parâmetros: {sum(p.numel() for p in model.parameters()):,}")
 
     # Resumir treinamento
@@ -790,8 +957,14 @@ def main():
         print(f"✅ Checkpoint carregado: {args.resume}")
 
     # Treinar
-    trainer = Trainer(args.plugin, model, device, learning_rate=args.lr)
-    trainer.train(train_loader, val_loader, epochs=args.epochs, patience=args.patience)
+    trainer = Trainer(args.plugin, model, device, config, learning_rate=args.lr)
+    trainer.train(
+        train_loader,
+        val_loader,
+        epochs=args.epochs,
+        patience=args.patience,
+        export_path=config.get("expected_path"),
+    )
 
 
 if __name__ == "__main__":

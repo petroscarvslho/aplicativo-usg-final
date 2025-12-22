@@ -199,10 +199,14 @@ Arquivos de pesquisa em:
 ## ESTADO ATUAL DO PROJETO (ATUALIZAR A CADA SESSAO)
 ====================================================================
 
-### Ultima atualizacao: 2025-12-22 (Sessao 11)
+### Ultima atualizacao: 2025-12-22 (Sessao 12)
 
-- FAST Protocol (fallback CV) otimizado: threshold adaptativo, filtros de contorno,
-  suavizacao temporal e alerta apenas com deteccao estabilizada.
+- Registro central `plugin_registry.py` com nomes de pesos, formatos de label e modelos por plugin.
+- Unified dataset manager expandido (FAST/ANATOMY/BLADDER/LUNG) + novos sinteticos (bladder/lung/fast).
+- Treinamento unificado alinhado com inferencia: VASST compat, EchoNet regression, Unet SMP.
+- Export automatico de pesos para `models/` com metadata `.meta.json`.
+- Novo script `training/train_yolo.py` para YOLO (NEEDLE/FAST).
+- VASST no app agora le metadata e suporta label order/scale automaticamente.
 
 ====================================================================
 ## PROJETOS RELACIONADOS
@@ -274,6 +278,28 @@ cd datasets
 python download_datasets.py  # Opcao 5 para sintetico
 python train_vasst.py        # Treinar modelo
 # Modelo salvo em: models/vasst_needle.pt
+```
+
+### SISTEMA UNIFICADO (Sessao 12):
+- `plugin_registry.py` centraliza nomes de pesos, formato de labels e modelos por plugin
+- `datasets/unified_dataset_manager.py` gera/exporta dados para TODOS os plugins
+- `training/train_unified.py` treina modelos compativeis com a inferencia
+- `training/train_yolo.py` treina deteccao YOLO (NEEDLE/FAST)
+- Export automatico em `models/` + metadata `.meta.json`
+
+**Fluxo recomendado:**
+```bash
+# 1) Preparar datasets (kaggle/SimpleITK no venv)
+python datasets/unified_dataset_manager.py
+
+# 2) Treinar regressao/segmentacao/classificacao
+python training/train_unified.py --plugin NEEDLE
+python training/train_unified.py --plugin NERVE --model unet
+python training/train_unified.py --plugin CARDIAC
+
+# 3) Treinar deteccao YOLO
+python training/train_yolo.py --plugin FAST
+python training/train_yolo.py --plugin NEEDLE
 ```
 
 ### NEEDLE PILOT v3.1 PREMIUM (Sessao 9):

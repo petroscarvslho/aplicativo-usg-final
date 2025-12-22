@@ -535,3 +535,28 @@ Usuario escolheu abordagem HIBRIDA para datasets:
 - ✅ Dataset Brachial Plexus baixado (42,321 frames)
 - ✅ Documentacao atualizada com proximos passos
 - ⏳ Pendente: Processar dataset e treinar com dados reais
+
+====================================================================
+## 2025-12-22 - Sessao 12: Pipeline Unificado + Treino Compativel
+====================================================================
+
+### Resumo
+- Registro central de modelos/labels em `plugin_registry.py`
+- Unified dataset manager expandido (FAST/ANATOMY/BLADDER/LUNG) + novos sinteticos
+- Treino unificado alinhado com inferencia (VASST compat, EchoNet regression, Unet SMP)
+- Export automatico para `models/` com metadata `.meta.json`
+- Script YOLO separado para deteccao (NEEDLE/FAST)
+- VASST no app agora le metadata e ajusta ordem/escala de labels
+
+### Arquivos Criados/Modificados
+- `plugin_registry.py`
+- `datasets/unified_dataset_manager.py`
+- `training/train_unified.py`
+- `training/train_yolo.py`
+- `src/ai_processor.py`
+
+### Proximos Passos
+1. Rodar `python datasets/unified_dataset_manager.py` para gerar exports por plugin
+2. Treinar modelos com `training/train_unified.py`
+3. Treinar YOLO com `training/train_yolo.py`
+4. Validar modelos no app e ajustar thresholds conforme necessario

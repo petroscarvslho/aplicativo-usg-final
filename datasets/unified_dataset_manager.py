@@ -42,13 +42,16 @@ except ImportError:
 # =============================================================================
 
 BASE_DIR = Path(__file__).parent
+sys.path.insert(0, str(BASE_DIR.parent))
+from plugin_registry import get_model_spec
 UNIFIED_DIR = BASE_DIR / "unified"
 RAW_DIR = UNIFIED_DIR / "raw"
 PROCESSED_DIR = UNIFIED_DIR / "processed"
 EXPORTS_DIR = UNIFIED_DIR / "exports"
+YOLO_EXPORTS_DIR = UNIFIED_DIR / "exports_yolo"
 
 # Criar diretórios
-for d in [UNIFIED_DIR, RAW_DIR, PROCESSED_DIR, EXPORTS_DIR]:
+for d in [UNIFIED_DIR, RAW_DIR, PROCESSED_DIR, EXPORTS_DIR, YOLO_EXPORTS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # =============================================================================
@@ -605,6 +608,7 @@ def _process_generic(raw_dir: Path, output_dir: Path, plugin: str) -> Path:
 
 def generate_synthetic_data(plugin: str, n_samples: int = 5000) -> Path:
     """Gera dados sintéticos para um plugin específico"""
+    plugin = plugin.upper()
     output_dir = PROCESSED_DIR / plugin.lower() / "synthetic"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -616,6 +620,14 @@ def generate_synthetic_data(plugin: str, n_samples: int = 5000) -> Path:
         return _generate_nerve_synthetic(output_dir, n_samples)
     elif plugin == "CARDIAC":
         return _generate_cardiac_synthetic(output_dir, n_samples)
+    elif plugin == "BLADDER":
+        return _generate_bladder_synthetic(output_dir, n_samples)
+    elif plugin == "FAST":
+        return _generate_fast_synthetic(output_dir, n_samples)
+    elif plugin == "LUNG":
+        return _generate_lung_synthetic(output_dir, n_samples)
+    elif plugin == "ANATOMY":
+        return _generate_anatomy_synthetic(output_dir, n_samples)
     else:
         return _generate_generic_synthetic(output_dir, n_samples)
 
@@ -689,12 +701,11 @@ def _generate_nerve_synthetic(output_dir: Path, n: int) -> Path:
 
         mask = np.zeros((256, 256), dtype=np.uint8)
 
-        # Músculo (classe 4)
+        # Músculo (apenas textura - não rotular)
         for _ in range(np.random.randint(1, 3)):
             y = np.random.randint(30, 200)
             h = np.random.randint(20, 50)
             cv2.rectangle(img, (0, y), (256, y + h), np.random.randint(60, 100), -1)
-            mask[y:y+h, :] = 4
 
         img = cv2.GaussianBlur(img, (5, 5), 1.5)
 
@@ -705,7 +716,7 @@ def _generate_nerve_synthetic(output_dir: Path, n: int) -> Path:
             cv2.ellipse(img, (cx, cy), (rx, ry), 0, 0, 360, np.random.randint(150, 200), -1)
             cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 1, -1)
 
-        # Artéria (classe 2)
+        # Artéria/Veia (classe 2 = vaso)
         if np.random.random() > 0.3:
             cx, cy = np.random.randint(40, 210), np.random.randint(50, 200)
             r = np.random.randint(8, 16)
@@ -713,13 +724,13 @@ def _generate_nerve_synthetic(output_dir: Path, n: int) -> Path:
             cv2.circle(img, (cx, cy), r, np.random.randint(160, 200), 2)
             cv2.circle(mask, (cx, cy), r, 2, -1)
 
-        # Veia (classe 3)
+        # Veia (classe 2 = vaso)
         if np.random.random() > 0.3:
             cx, cy = np.random.randint(40, 210), np.random.randint(50, 200)
             rx, ry = np.random.randint(10, 22), np.random.randint(5, 12)
             cv2.ellipse(img, (cx, cy), (rx, ry), np.random.randint(-20, 20),
                        0, 360, np.random.randint(15, 35), -1)
-            cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 3, -1)
+            cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 2, -1)
 
         # Ruído
         img = np.clip(img + np.random.normal(0, 6, img.shape), 0, 255).astype(np.uint8)
@@ -742,10 +753,17 @@ def _generate_cardiac_synthetic(output_dir: Path, n: int) -> Path:
     """Gera dados sintéticos para cardiac"""
     images = []
     masks = []
+    labels = []
 
     for i in range(n):
         if (i + 1) % 1000 == 0:
             print(f"   Progresso: {i + 1}/{n}")
+
+        # Labels alvo (normalizados)
+        edv_ml = np.random.uniform(80, 160)
+        ef = np.random.uniform(0.35, 0.7)
+        esv_ml = edv_ml * (1 - ef)
+        labels.append([ef, esv_ml / 150.0, edv_ml / 150.0])
 
         # Base escura (cavity)
         img = np.random.randint(10, 30, (256, 256), dtype=np.uint8)
@@ -753,7 +771,9 @@ def _generate_cardiac_synthetic(output_dir: Path, n: int) -> Path:
 
         # Ventrículo esquerdo (LV)
         cx, cy = 128 + np.random.randint(-20, 20), 140 + np.random.randint(-20, 20)
-        rx, ry = np.random.randint(40, 60), np.random.randint(50, 70)
+        scale = (edv_ml - 80) / 80.0
+        rx = int(35 + scale * 25)
+        ry = int(45 + scale * 25)
         cv2.ellipse(img, (cx, cy), (rx, ry), 0, 0, 360, np.random.randint(5, 20), -1)
         cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 1, -1)  # LV
 
@@ -778,12 +798,144 @@ def _generate_cardiac_synthetic(output_dir: Path, n: int) -> Path:
     images = np.array(images, dtype=np.uint8)
     images = np.expand_dims(images, axis=-1)
     masks = np.array(masks, dtype=np.uint8)
+    labels = np.array(labels, dtype=np.float32)
+
+    np.save(output_dir / "images.npy", images)
+    np.save(output_dir / "masks.npy", masks)
+    np.save(output_dir / "labels.npy", labels)
+
+    print(f"✅ Gerado: {n} amostras para CARDIAC")
+    return output_dir
+
+
+def _generate_bladder_synthetic(output_dir: Path, n: int) -> Path:
+    """Gera dados sintéticos para bexiga (segmentacao binaria)."""
+    images = []
+    masks = []
+
+    for i in range(n):
+        if (i + 1) % 1000 == 0:
+            print(f"   Progresso: {i + 1}/{n}")
+
+        img = np.random.randint(20, 60, (256, 256), dtype=np.uint8)
+        img = (img * np.random.exponential(1.0, (256, 256))).clip(0, 255).astype(np.uint8)
+        img = cv2.GaussianBlur(img, (5, 5), 1.5)
+
+        mask = np.zeros((256, 256), dtype=np.uint8)
+        cx, cy = np.random.randint(80, 176), np.random.randint(90, 190)
+        rx, ry = np.random.randint(30, 60), np.random.randint(20, 45)
+
+        cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 1, -1)
+        cv2.ellipse(img, (cx, cy), (rx, ry), 0, 0, 360, np.random.randint(5, 20), -1)
+
+        img = cv2.GaussianBlur(img, (7, 7), 2)
+        images.append(img)
+        masks.append(mask)
+
+    images = np.array(images, dtype=np.uint8)
+    images = np.expand_dims(images, axis=-1)
+    masks = np.array(masks, dtype=np.uint8)
 
     np.save(output_dir / "images.npy", images)
     np.save(output_dir / "masks.npy", masks)
 
-    print(f"✅ Gerado: {n} amostras para CARDIAC")
+    print(f"✅ Gerado: {n} amostras para BLADDER")
     return output_dir
+
+
+def _generate_fast_synthetic(output_dir: Path, n: int) -> Path:
+    """Gera dados sintéticos para FAST (detecção com bbox YOLO)."""
+    images = []
+    labels = []
+
+    for i in range(n):
+        if (i + 1) % 1000 == 0:
+            print(f"   Progresso: {i + 1}/{n}")
+
+        img = np.random.randint(20, 60, (256, 256), dtype=np.uint8)
+        img = (img * np.random.exponential(1.0, (256, 256))).clip(0, 255).astype(np.uint8)
+        img = cv2.GaussianBlur(img, (5, 5), 1.5)
+
+        # "Liquido livre" como regiao anecoica
+        x1 = np.random.randint(30, 150)
+        y1 = np.random.randint(40, 160)
+        w = np.random.randint(40, 90)
+        h = np.random.randint(30, 70)
+        x2 = min(x1 + w, 255)
+        y2 = min(y1 + h, 255)
+
+        cv2.rectangle(img, (x1, y1), (x2, y2), np.random.randint(5, 25), -1)
+
+        # BBox YOLO (classe 0)
+        x_center = ((x1 + x2) / 2) / 256.0
+        y_center = ((y1 + y2) / 2) / 256.0
+        bw = (x2 - x1) / 256.0
+        bh = (y2 - y1) / 256.0
+        labels.append([0, x_center, y_center, bw, bh])
+
+        images.append(img)
+
+    images = np.array(images, dtype=np.uint8)
+    images = np.expand_dims(images, axis=-1)
+    labels = np.array(labels, dtype=np.float32)
+
+    np.save(output_dir / "images.npy", images)
+    np.save(output_dir / "labels.npy", labels)
+
+    print(f"✅ Gerado: {n} amostras para FAST")
+    return output_dir
+
+
+def _generate_lung_synthetic(output_dir: Path, n: int) -> Path:
+    """Gera dados sintéticos para classificacao de linhas B."""
+    images = []
+    labels = []
+
+    for i in range(n):
+        if (i + 1) % 1000 == 0:
+            print(f"   Progresso: {i + 1}/{n}")
+
+        img = np.random.randint(20, 60, (256, 256), dtype=np.uint8)
+        img = (img * np.random.exponential(1.0, (256, 256))).clip(0, 255).astype(np.uint8)
+
+        # Linha pleural
+        pleura_y = np.random.randint(30, 60)
+        cv2.line(img, (0, pleura_y), (255, pleura_y), 200, 2)
+
+        # B-lines
+        n_blines = np.random.randint(0, 9)
+        for _ in range(n_blines):
+            x = np.random.randint(20, 235)
+            cv2.line(img, (x, pleura_y + 2), (x, 255), np.random.randint(160, 220), 1)
+
+        # Classe por quantidade
+        if n_blines == 0:
+            cls = 0
+        elif n_blines <= 2:
+            cls = 1
+        elif n_blines <= 5:
+            cls = 2
+        else:
+            cls = 3
+
+        img = cv2.GaussianBlur(img, (3, 3), 0.8)
+        images.append(img)
+        labels.append(cls)
+
+    images = np.array(images, dtype=np.uint8)
+    images = np.expand_dims(images, axis=-1)
+    labels = np.array(labels, dtype=np.int64)
+
+    np.save(output_dir / "images.npy", images)
+    np.save(output_dir / "labels.npy", labels)
+
+    print(f"✅ Gerado: {n} amostras para LUNG")
+    return output_dir
+
+
+def _generate_anatomy_synthetic(output_dir: Path, n: int) -> Path:
+    """Gera dados sintéticos para ANATOMY (usa mesma base do NERVE)."""
+    return _generate_nerve_synthetic(output_dir, n)
 
 
 def _generate_generic_synthetic(output_dir: Path, n: int) -> Path:
@@ -795,8 +947,20 @@ def _generate_generic_synthetic(output_dir: Path, n: int) -> Path:
 # COMBINAÇÃO E EXPORTAÇÃO
 # =============================================================================
 
+MASK_LABEL_TYPES = {"mask_classes", "mask_binary"}
+
+
+def _select_label_source(plugin: str) -> str:
+    spec = get_model_spec(plugin)
+    if not spec:
+        return "labels"
+    label_type = spec.get("label_type", "labels")
+    return "masks" if label_type in MASK_LABEL_TYPES else "labels"
+
+
 def combine_for_plugin(plugin: str) -> Path:
     """Combina todos os datasets processados para um plugin"""
+    plugin = plugin.upper()
     plugin_dir = PROCESSED_DIR / plugin.lower()
 
     if not plugin_dir.exists():
@@ -806,6 +970,8 @@ def combine_for_plugin(plugin: str) -> Path:
     all_images = []
     all_labels = []
     sources = []
+
+    label_source = _select_label_source(plugin)
 
     # Encontrar todos os datasets
     for dataset_dir in plugin_dir.iterdir():
@@ -820,12 +986,22 @@ def combine_for_plugin(plugin: str) -> Path:
             images = np.load(images_file)
             all_images.append(images)
 
-            if labels_file.exists():
-                labels = np.load(labels_file)
-                all_labels.append(labels)
-            elif masks_file.exists():
-                masks = np.load(masks_file)
-                all_labels.append(masks)
+            labels = None
+            if label_source == "labels":
+                if labels_file.exists():
+                    labels = np.load(labels_file)
+                elif masks_file.exists():
+                    labels = np.load(masks_file)
+            else:
+                if masks_file.exists():
+                    labels = np.load(masks_file)
+                elif labels_file.exists():
+                    labels = np.load(labels_file)
+
+            if labels is None:
+                continue
+
+            all_labels.append(labels)
 
             sources.append((dataset_dir.name, len(images)))
             print(f"   + {dataset_dir.name}: {len(images)} amostras")
@@ -918,7 +1094,7 @@ def show_status():
 
     # Processed
     print("\n📁 PROCESSED (Por plugin):")
-    for plugin in ["needle", "nerve", "cardiac", "fast", "anatomy", "lung"]:
+    for plugin in ["needle", "nerve", "cardiac", "fast", "anatomy", "bladder", "lung"]:
         plugin_dir = PROCESSED_DIR / plugin
         if plugin_dir.exists():
             total = 0
@@ -975,11 +1151,11 @@ def main():
     elif choice == "4":
         print("\nDatasets disponíveis:", list(DATASET_CATALOG.keys()))
         key = input("Dataset: ").strip()
-        plugin = input("Plugin (NEEDLE/NERVE/CARDIAC/FAST/ANATOMY/LUNG): ").strip().upper()
+        plugin = input("Plugin (NEEDLE/NERVE/CARDIAC/FAST/ANATOMY/BLADDER/LUNG): ").strip().upper()
         process_for_plugin(key, plugin)
 
     elif choice == "5":
-        plugin = input("Plugin (NEEDLE/NERVE/CARDIAC): ").strip().upper() or "NERVE"
+        plugin = input("Plugin (NEEDLE/NERVE/CARDIAC/FAST/ANATOMY/BLADDER/LUNG): ").strip().upper() or "NERVE"
         n = int(input("Número de amostras [5000]: ").strip() or "5000")
         generate_synthetic_data(plugin, n)
 
@@ -992,7 +1168,7 @@ def main():
         print("=" * 50)
 
         # Plugins principais
-        plugins = ["NEEDLE", "NERVE", "CARDIAC"]
+        plugins = ["NEEDLE", "NERVE", "CARDIAC", "FAST", "ANATOMY", "BLADDER", "LUNG"]
 
         for plugin in plugins:
             print(f"\n\n{'='*50}")

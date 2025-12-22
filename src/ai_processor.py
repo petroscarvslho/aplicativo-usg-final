@@ -11,7 +11,9 @@ import cv2
 import numpy as np
 import time
 import os
+import json
 import logging
+from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any, Deque
 from collections import deque
 import config
@@ -81,10 +83,10 @@ class VASSTPyTorch(nn.Module):
     Arquitetura:
     - 5 camadas Conv2D com LeakyReLU e MaxPool
     - Flatten + 3 camadas Dense
-    - Saída: coordenadas (x, y) normalizadas em [-1, 1]
+    - Saída: coordenadas normalizadas (y, x) em [0, 1] (compatível via metadata)
 
     Input: Imagem grayscale (1, H, W)
-    Output: Coordenadas (x, y) do centroide da agulha
+    Output: Coordenadas (y, x) do centroide da agulha
     """
 
     def __init__(self, input_shape: Tuple[int, int] = (256, 256)):
@@ -110,6 +112,10 @@ class VASSTPyTorch(nn.Module):
         self.fc1 = nn.Linear(1024, 128)
         self.fc2 = nn.Linear(128, 16)
         self.output = nn.Linear(16, 2)  # (x, y)
+
+        # Metadados de label (default do treinamento atual)
+        self.label_order = "yx"
+        self.label_scale = "0_1"
 
     def _calculate_flatten_size(self):
         """Calcula o tamanho após todas as convoluções."""
@@ -170,12 +176,30 @@ class VASSTPyTorch(nn.Module):
         with torch.no_grad():
             output = self.forward(tensor)
 
-        # Converter de [-1, 1] para coordenadas de pixel
-        x_norm, y_norm = output[0].numpy()
-        x = (x_norm + 1) / 2 * w
-        y = (y_norm + 1) / 2 * h
+        vals = output[0].cpu().numpy()
+        if getattr(self, "label_order", "yx") == "xy":
+            x_norm, y_norm = vals
+        else:
+            y_norm, x_norm = vals
 
-        return float(x), float(y)
+        scale = getattr(self, "label_scale", "auto")
+        if scale not in {"0_1", "neg1_1"}:
+            scale = "auto"
+
+        if scale == "auto":
+            scale = "neg1_1" if (x_norm < 0 or y_norm < 0) else "0_1"
+
+        if scale == "neg1_1":
+            x = (x_norm + 1) / 2 * w
+            y = (y_norm + 1) / 2 * h
+        else:
+            x = x_norm * w
+            y = y_norm * h
+
+        x = float(np.clip(x, 0, w - 1))
+        y = float(np.clip(y, 0, h - 1))
+
+        return x, y
 
 
 class TemporalSmoother:
@@ -1000,7 +1024,25 @@ class AIProcessor:
         if os.path.exists(self.vasst_weights_path):
             try:
                 self.vasst_model = VASSTPyTorch()
-                self.vasst_model.load_state_dict(torch.load(self.vasst_weights_path, map_location=self.device))
+                state = torch.load(self.vasst_weights_path, map_location=self.device)
+                if isinstance(state, dict) and "model_state_dict" in state:
+                    state_dict = state["model_state_dict"]
+                    meta = state.get("meta", {})
+                else:
+                    state_dict = state
+                    meta = {}
+
+                # Metadata via arquivo .meta.json (tem prioridade)
+                meta_path = Path(self.vasst_weights_path).with_suffix(".meta.json")
+                if meta_path.exists():
+                    try:
+                        meta = json.loads(meta_path.read_text())
+                    except Exception:
+                        pass
+
+                self.vasst_model.load_state_dict(state_dict)
+                self.vasst_model.label_scale = meta.get("label_scale", self.vasst_model.label_scale)
+                self.vasst_model.label_order = meta.get("label_order", self.vasst_model.label_order)
                 self.vasst_model.to(self.device)
                 self.vasst_model.eval()
                 self.vasst_available = True

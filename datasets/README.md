@@ -1,11 +1,12 @@
-# NEEDLE PILOT v3.1 - Sistema de Datasets e Treinamento
+# USG FLOW - Sistema de Datasets e Treinamento
 
 ## Visao Geral
 
 Este diretorio contem os scripts necessarios para:
 1. Download de datasets de ultrassom
-2. Processamento e preparacao de dados
-3. Treinamento da CNN VASST para deteccao de agulhas
+2. Processamento e preparacao de dados (unificado por plugin)
+3. Export de dados para treinamento
+4. Treinamento de modelos compatíveis com a inferência
 
 ## Estrutura de Diretorios
 
@@ -13,6 +14,7 @@ Este diretorio contem os scripts necessarios para:
 datasets/
 ├── download_datasets.py    # Script principal de download
 ├── train_vasst.py          # Script de treinamento da CNN
+├── unified_dataset_manager.py  # Gerenciador unificado (todos os plugins)
 ├── README.md               # Este arquivo
 │
 ├── kaggle_nerve/           # Dataset Kaggle (5,635 imagens)
@@ -30,39 +32,32 @@ datasets/
     └── combined/           # Datasets combinados
 ```
 
-## Como Usar
+## Como Usar (Unificado)
 
-### 1. Gerar Dataset Sintetico (Recomendado para comecar)
+### 1. Preparar Datasets por Plugin
 
 ```bash
 cd datasets
-python download_datasets.py
-# Escolha opcao 5
-# Digite numero de amostras (ex: 5000)
+python unified_dataset_manager.py
+# Opcao 7 (setup completo) ou use opcoes 3-6 manualmente
 ```
 
-### 2. Baixar Dataset do Kaggle
+### 2. Treinar Modelos (plugin_registry)
 
 ```bash
-# Primeiro configure a API do Kaggle:
-# 1. Crie conta em kaggle.com
-# 2. Va em Account > API > Create New Token
-# 3. Salve kaggle.json em ~/.kaggle/
-# 4. chmod 600 ~/.kaggle/kaggle.json
-
-python download_datasets.py
-# Escolha opcao 1
+python training/train_unified.py --plugin NEEDLE
+python training/train_unified.py --plugin NERVE --model unet
+python training/train_unified.py --plugin CARDIAC
 ```
 
-### 3. Treinar a CNN VASST
+### 3. Treinar YOLO (deteccao)
 
 ```bash
-python train_vasst.py
-# Escolha opcao 1 para treinar
-# Configure epocas e batch size conforme necessario
+python training/train_yolo.py --plugin FAST
+python training/train_yolo.py --plugin NEEDLE
 ```
 
-O modelo treinado sera salvo em: `models/vasst_needle.pt`
+Os modelos treinados sao exportados automaticamente para `models/` com `.meta.json`.
 
 ## Datasets Disponiveis
 
