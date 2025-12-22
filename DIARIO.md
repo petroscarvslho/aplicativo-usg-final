@@ -1,6 +1,24 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-22 - Sessao 14: BLADDER AI - Dual View + Qualidade
+====================================================================
+
+### Resumo
+Melhoria do fallback CV do BLADDER com deteccao mais robusta, medida por
+duas vistas e indicador de qualidade.
+
+### Melhorias Principais
+1. **ROI adaptativa + threshold por percentil** para reduzir falso positivo
+2. **Score de contorno** (area, circularidade, solidez, contraste)
+3. **Duas vistas (transverse/sagittal)** com combinacao de medidas
+4. **Suavizacao temporal** de dimensoes e volume
+5. **Indicador de qualidade** e timeout de confianca
+
+### Arquivos Modificados
+- `src/ai_processor.py` - Deteccao e volume com dual-view + painel
+
+====================================================================
 ## 2025-12-22 - Sessao 13: LUNG AI - Auto B-Lines (Fallback CV)
 ====================================================================
 

@@ -473,6 +473,17 @@ class AIProcessor:
         self.bladder_d3 = None
         self.bladder_pvr_mode = False
         self.bladder_pre_void = None
+        self.bladder_view = None
+        self.bladder_quality = 0.0
+        self.bladder_last_update = 0.0
+        self.bladder_view_data = {
+            'transverse': {'major': None, 'minor': None, 't': 0.0},
+            'sagittal': {'major': None, 'minor': None, 't': 0.0},
+        }
+        self.bladder_view_history = {
+            'transverse': deque(maxlen=8),
+            'sagittal': deque(maxlen=8),
+        }
 
         # ═══════════════════════════════════════════════════════════════════════
         # NERVE TRACK v2.0 PREMIUM - Sistema Avançado de Detecção de Nervos
@@ -1272,6 +1283,17 @@ class AIProcessor:
             self.bladder_d2 = None
             self.bladder_d3 = None
             self.bladder_volume = None
+            self.bladder_view = None
+            self.bladder_quality = 0.0
+            self.bladder_last_update = 0.0
+            self.bladder_view_data = {
+                'transverse': {'major': None, 'minor': None, 't': 0.0},
+                'sagittal': {'major': None, 'minor': None, 't': 0.0},
+            }
+            self.bladder_view_history = {
+                'transverse': deque(maxlen=8),
+                'sagittal': deque(maxlen=8),
+            }
 
     def _load_model(self, mode):
         """Carrega modelo sob demanda (lazy loading)."""
@@ -2143,6 +2165,10 @@ class AIProcessor:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
+        enhanced = cv2.GaussianBlur(enhanced, (5, 5), 0)
+
+        now = time.time()
+        best_score = 0.0
 
         circles = cv2.HoughCircles(
             enhanced, cv2.HOUGH_GRADIENT, 1, 30,
@@ -4228,6 +4254,10 @@ class AIProcessor:
                 binary = (mask > 0.5).astype(np.uint8)
 
                 if binary.any():
+                    # Suavizar mascara do modelo
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+                    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
                     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if contours:
                         largest = max(contours, key=cv2.contourArea)
@@ -4240,32 +4270,89 @@ class AIProcessor:
 
         # Fallback CV
         if not mask_found:
-            # Bexiga tipicamente anecoica (escura)
-            _, thresh = cv2.threshold(enhanced, 45, 255, cv2.THRESH_BINARY_INV)
+            # Bexiga tipicamente anecoica (escura) - threshold adaptativo em ROI
+            rx0, ry0, rw, rh = 0.15, 0.35, 0.7, 0.55
+            x0 = int(w * rx0)
+            y0 = int(h * ry0)
+            x1 = int(w * (rx0 + rw))
+            y1 = int(h * (ry0 + rh))
+            roi = enhanced[y0:y1, x0:x1]
+            if roi.size == 0:
+                roi = enhanced
+                x0, y0, x1, y1 = 0, 0, w, h
+
+            thresh_val = int(np.clip(np.percentile(roi, 20), 25, 80))
+            _, thresh = cv2.threshold(enhanced, thresh_val, 255, cv2.THRESH_BINARY_INV)
+
+            # Focar no ROI para reduzir falsos positivos
+            roi_mask = np.zeros_like(thresh)
+            roi_mask[y0:y1, x0:x1] = 255
+            thresh = cv2.bitwise_and(thresh, roi_mask)
 
             # Morfologia para limpar
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
             thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
             thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
 
+            # Preencher buracos
+            h_mask, w_mask = thresh.shape[:2]
+            flood = thresh.copy()
+            cv2.floodFill(flood, np.zeros((h_mask + 2, w_mask + 2), np.uint8), (0, 0), 255)
+            flood_inv = cv2.bitwise_not(flood)
+            thresh = cv2.bitwise_or(thresh, flood_inv)
+
             contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             if contours:
                 # Encontrar contorno mais provavel (grande e eliptico)
                 best_contour = None
-                best_score = 0
+                best_score = 0.0
+                roi_mean = float(np.mean(roi))
+                roi_area = max(1.0, (x1 - x0) * (y1 - y0))
 
                 for cnt in contours:
                     area = cv2.contourArea(cnt)
-                    if area > 3000:
-                        perimeter = cv2.arcLength(cnt, True)
-                        if perimeter > 0:
-                            circularity = 4 * np.pi * area / (perimeter ** 2)
-                            # Score baseado em area e circularidade
-                            score = area * (circularity ** 2)
-                            if score > best_score:
-                                best_score = score
-                                best_contour = cnt
+                    if area < roi_area * 0.01 or area > roi_area * 0.5:
+                        continue
+
+                    x, y, cw, ch = cv2.boundingRect(cnt)
+                    if cw < 20 or ch < 20:
+                        continue
+
+                    cx = x + cw // 2
+                    cy = y + ch // 2
+                    if not (x0 <= cx <= x1 and y0 <= cy <= y1):
+                        continue
+
+                    perimeter = cv2.arcLength(cnt, True)
+                    circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else 0.0
+
+                    hull = cv2.convexHull(cnt)
+                    hull_area = cv2.contourArea(hull)
+                    solidity = area / hull_area if hull_area > 0 else 0.0
+
+                    mask = np.zeros_like(enhanced, dtype=np.uint8)
+                    cv2.drawContours(mask, [cnt], -1, 255, -1)
+                    mean_inside = cv2.mean(enhanced, mask=mask)[0]
+                    contrast = max(0.0, roi_mean - mean_inside)
+                    if contrast < 10:
+                        continue
+
+                    area_score = min(area / (0.2 * roi_area), 1.0)
+                    circ_score = min(max((circularity - 0.2) / 0.6, 0.0), 1.0)
+                    solidity_score = min(max((solidity - 0.6) / 0.4, 0.0), 1.0)
+                    contrast_score = min(contrast / 50.0, 1.0)
+
+                    score = (
+                        0.4 * contrast_score
+                        + 0.25 * area_score
+                        + 0.2 * solidity_score
+                        + 0.15 * circ_score
+                    )
+
+                    if score > best_score:
+                        best_score = score
+                        best_contour = cnt
 
                 if best_contour is not None:
                     contour_to_draw = best_contour
@@ -4275,6 +4362,20 @@ class AIProcessor:
         # ═══════════════════════════════════════
 
         if contour_to_draw is not None:
+            # Calcular qualidade mesmo com modelo
+            if best_score <= 0:
+                perimeter = cv2.arcLength(contour_to_draw, True)
+                area = cv2.contourArea(contour_to_draw)
+                circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else 0.0
+                hull = cv2.convexHull(contour_to_draw)
+                hull_area = cv2.contourArea(hull)
+                solidity = area / hull_area if hull_area > 0 else 0.0
+                best_score = min(1.0, max(0.2, circularity + solidity) / 2.0)
+
+        quality_threshold = 0.45
+        self.bladder_quality = float(np.clip(best_score, 0.0, 1.0))
+
+        if contour_to_draw is not None and self.bladder_quality >= quality_threshold:
             area = cv2.contourArea(contour_to_draw)
 
             # Retangulo rotacionado para dimensoes
@@ -4287,16 +4388,49 @@ class AIProcessor:
                 width, height = height, width
 
             px_to_mm = 0.3
-            self.bladder_d1 = width * px_to_mm   # Maior diametro
-            self.bladder_d2 = height * px_to_mm  # Menor diametro
-            self.bladder_d3 = (self.bladder_d1 + self.bladder_d2) / 2  # Estimado
+            major_mm = width * px_to_mm
+            minor_mm = height * px_to_mm
+
+            aspect = width / (height + 1e-6)
+            view = "transverse" if aspect < 1.35 else "sagittal"
+            self.bladder_view = view
+            self.bladder_view_history[view].append((major_mm, minor_mm))
+
+            view_hist = self.bladder_view_history[view]
+            majors = [m[0] for m in view_hist]
+            minors = [m[1] for m in view_hist]
+            major_mm = float(np.median(majors)) if majors else major_mm
+            minor_mm = float(np.median(minors)) if minors else minor_mm
+
+            self.bladder_view_data[view] = {
+                'major': major_mm,
+                'minor': minor_mm,
+                't': now,
+            }
+
+            trans = self.bladder_view_data['transverse']
+            sag = self.bladder_view_data['sagittal']
+            use_dual = (now - trans['t'] < 8.0) and (now - sag['t'] < 8.0)
+
+            if use_dual and trans['major'] and sag['major']:
+                self.bladder_d1 = trans['major']  # largura LR
+                self.bladder_d2 = sag['major']    # altura CC
+                d3_vals = [v for v in [trans['minor'], sag['minor']] if v]
+                self.bladder_d3 = float(np.mean(d3_vals)) if d3_vals else (self.bladder_d1 + self.bladder_d2) / 2
+            else:
+                self.bladder_d1 = major_mm
+                self.bladder_d2 = minor_mm
+                self.bladder_d3 = (self.bladder_d1 + self.bladder_d2) / 2
 
             # Formula do elipsoide: V = 0.52 x D1 x D2 x D3
             volume_ml = 0.52 * self.bladder_d1 * self.bladder_d2 * self.bladder_d3 / 1000
             volume_ml = max(0, min(1000, volume_ml))
 
-            self.bladder_volume = volume_ml
             self.bladder_history.append(volume_ml)
+            if len(self.bladder_history) >= 3:
+                volume_ml = float(np.median(self.bladder_history))
+            self.bladder_volume = volume_ml
+            self.bladder_last_update = now
 
             # ═══════════════════════════════════════
             # VISUALIZACAO DA BEXIGA
@@ -4338,6 +4472,14 @@ class AIProcessor:
             # Centro
             cv2.circle(output, bladder_center, 4, (255, 255, 255), -1)
             cv2.circle(output, bladder_center, 6, (200, 150, 255), 1)
+        else:
+            if now - self.bladder_last_update > 2.5:
+                self.bladder_volume = None
+                self.bladder_d1 = None
+                self.bladder_d2 = None
+                self.bladder_d3 = None
+                self.bladder_view = None
+            self.bladder_quality = max(0.0, self.bladder_quality - 0.05)
 
         # ═══════════════════════════════════════
         # PAINEL PRINCIPAL
@@ -4430,6 +4572,22 @@ class AIProcessor:
         # Formula
         cv2.putText(output, "V = 0.52 x D1 x D2 x D3", (panel_x + 10, dim_y + 55),
                    cv2.FONT_HERSHEY_DUPLEX, 0.25, (100, 90, 120), 1, cv2.LINE_AA)
+
+        # View + qualidade
+        view_label = self.bladder_view.upper() if self.bladder_view else "---"
+        if self.bladder_view == "transverse":
+            view_label = "TRANS"
+        elif self.bladder_view == "sagittal":
+            view_label = "SAG"
+        if self.bladder_view_data['transverse']['t'] and self.bladder_view_data['sagittal']['t']:
+            if now - self.bladder_view_data['transverse']['t'] < 8.0 and now - self.bladder_view_data['sagittal']['t'] < 8.0:
+                view_label = "DUAL"
+
+        qual_pct = int(self.bladder_quality * 100)
+        cv2.putText(output, f"VIEW: {view_label}", (panel_x + 10, dim_y + 70),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (130, 120, 150), 1, cv2.LINE_AA)
+        cv2.putText(output, f"QUALITY: {qual_pct}%", (panel_x + 10, dim_y + 88),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (130, 120, 150), 1, cv2.LINE_AA)
 
         # PVR indicator
         pvr_y = panel_y + panel_h - 15

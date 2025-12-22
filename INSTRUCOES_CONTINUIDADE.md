@@ -199,7 +199,7 @@ Arquivos de pesquisa em:
 ## ESTADO ATUAL DO PROJETO (ATUALIZAR A CADA SESSAO)
 ====================================================================
 
-### Ultima atualizacao: 2025-12-22 (Sessao 12)
+### Ultima atualizacao: 2025-12-22 (Sessao 14)
 
 - Registro central `plugin_registry.py` com nomes de pesos, formatos de label e modelos por plugin.
 - Unified dataset manager expandido (FAST/ANATOMY/BLADDER/LUNG) + novos sinteticos (bladder/lung/fast).
@@ -210,6 +210,7 @@ Arquivos de pesquisa em:
 - REFERENCIAS.md expandido com pesquisa externa (apps pagos, AI comerciais,
   papers/whitepapers, datasets, repos GitHub e threads do Reddit).
 - LUNG AI fallback CV com Auto B-lines (densidade + clusters) e pleura_y suavizado.
+- BLADDER AI fallback CV com dual-view (sag/trans), score de qualidade e suavizacao.
 
 ====================================================================
 ## PROJETOS RELACIONADOS
