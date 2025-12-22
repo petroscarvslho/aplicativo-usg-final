@@ -34,6 +34,29 @@ Somente apos isso, continuar o desenvolvimento.
 ```
 
 ====================================================================
+## PASSO A PASSO PARA CONTINUAR (SEM TREINAMENTO)
+====================================================================
+
+1. Ir para o projeto e ativar o ambiente:
+   - `cd /Users/priscoleao/aplicativo-usg-final`
+   - `source /Users/priscoleao/usgapp/.venv/bin/activate`
+2. Ler documentos obrigatorios:
+   - `README.md`, `INSTRUCOES_CONTINUIDADE.md`, `REFERENCIAS.md`, `DIARIO.md`, `config.py`
+3. Verificar estado do repo:
+   - `git status`
+   - `git log --oneline -10`
+4. Confirmar que o treinamento de datasets esta rodando em outro terminal.
+   - NAO iniciar treinamento neste terminal.
+5. Se precisar validar UI, abrir o app:
+   - `python3 main.py`
+6. Foco atual de melhoria (ordem):
+   - FAST Protocol (melhorar confianca e workflow)
+   - LUNG / BLADDER / CARDIAC (refinar overlays e criterios)
+7. Antes de encerrar a sessao:
+   - Atualizar `DIARIO.md` e `INSTRUCOES_CONTINUIDADE.md`
+   - Commitar apenas o que foi feito nesta sessao
+
+====================================================================
 ## REGRA ABSOLUTA ANTES DE FECHAR QUALQUER CHAT / SESSAO
 ====================================================================
 
@@ -199,7 +222,7 @@ Arquivos de pesquisa em:
 ## ESTADO ATUAL DO PROJETO (ATUALIZAR A CADA SESSAO)
 ====================================================================
 
-### Ultima atualizacao: 2025-12-22 (Sessao 16)
+### Ultima atualizacao: 2025-12-22 (Sessao 17)
 
 - Registro central `plugin_registry.py` com nomes de pesos, formatos de label e modelos por plugin.
 - Unified dataset manager expandido (FAST/ANATOMY/BLADDER/LUNG) + novos sinteticos (bladder/lung/fast).
@@ -214,6 +237,9 @@ Arquivos de pesquisa em:
 - BLADDER AI fallback CV com dual-view (sag/trans), score de qualidade e suavizacao.
 - CARDIAC AI fallback CV com AutoEF mais robusto (percentis + suavizacao).
 - Auto Gain + Scan Quality overlay integrado em FAST/LUNG/BLADDER/CARDIAC.
+- Treinamento de datasets ocorre em outro terminal (nao iniciar aqui).
+- Repo local com alteracoes nao commitadas em `datasets/unified_dataset_manager.py`,
+  `training/train_unified.py`, `datasets/unified/` e `training/checkpoints/` (revisar antes de commitar).
 
 ====================================================================
 ## PROJETOS RELACIONADOS

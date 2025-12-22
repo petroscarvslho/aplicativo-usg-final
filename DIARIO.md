@@ -1,6 +1,23 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-22 - Sessao 17: Passo a Passo de Continuidade
+====================================================================
+
+### Resumo
+Atualizacao das instrucoes de continuidade com passo a passo completo
+para novo terminal, incluindo foco sem treinamento e alertas de estado
+do repositorio.
+
+### Melhorias Principais
+1. **Checklist de continuidade** (sem treinamento) integrado
+2. **Estado do repo** registrado para evitar commits acidentais
+3. **Proximos passos** priorizados por ordem (FAST primeiro)
+
+### Arquivos Modificados
+- `INSTRUCOES_CONTINUIDADE.md` - Passo a passo de continuidade
+
+====================================================================
 ## 2025-12-22 - Sessao 16: Auto Gain + Scan Quality (FAST/LUNG/BLADDER/CARDIAC)
 ====================================================================
 
