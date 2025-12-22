@@ -398,6 +398,14 @@ class USGApp:
         # ROI para IA ZONE (sistema profissional)
         self.process_roi = None
         self.selecting_roi = False
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # NERVE TRACK v2.0 - Seleção de Bloqueio Nervoso
+        # ═══════════════════════════════════════════════════════════════════════
+        self.nerve_block_idx = 0  # Índice do bloqueio selecionado
+        self.nerve_block_ids = []  # Lista de IDs de bloqueios disponíveis
+        self.nerve_block_names = {}  # Mapa ID -> Nome
+        self.nerve_block_show_menu = False  # Mostrar menu de seleção
         self.roi_start = None
         self.roi_end = None
         self.roi_confirmed = False  # ROI confirmada com ENTER
@@ -479,6 +487,11 @@ class USGApp:
         print("    ?       = Ajuda")
         print("    F11     = Fullscreen")
         print("    Q/ESC   = Sair")
+        print("-" * 60)
+        print("  NERVE TRACK (28 bloqueios nervosos):")
+        print("    < / ,   = Bloco anterior")
+        print("    > / .   = Próximo bloco")
+        print("    N       = Menu de bloqueios")
         print("=" * 60 + "\n")
 
     def _criar_botoes(self):
@@ -855,6 +868,12 @@ class USGApp:
             self.ai_thread.reset()
             logger.debug(f"AI modo: {new_mode}")
 
+            # Carregar bloqueios nervosos quando NERVE é selecionado
+            if idx == 1:  # NERVE
+                self._load_nerve_blocks()
+                if self.nerve_block_ids:
+                    self._apply_nerve_block()
+
     def _load_ai_if_needed(self):
         """Carrega a IA se ainda não foi carregada"""
         if self.ai is None and not self.ai_loading:
@@ -907,6 +926,73 @@ class USGApp:
     def _toggle_sidebar(self):
         self.show_sidebar = not self.show_sidebar
         self._invalidate_sidebar()
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # NERVE TRACK v2.0 - Gerenciamento de Bloqueios Nervosos
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _load_nerve_blocks(self):
+        """Carrega lista de bloqueios nervosos disponíveis."""
+        if self.ai is None:
+            return
+
+        try:
+            blocks = self.ai.get_available_nerve_blocks()
+            if blocks:
+                self.nerve_block_names = blocks
+                self.nerve_block_ids = list(blocks.keys())
+                logger.info(f"Carregados {len(self.nerve_block_ids)} bloqueios nervosos")
+        except Exception as e:
+            logger.warning(f"Erro ao carregar bloqueios: {e}")
+
+    def _next_nerve_block(self):
+        """Avança para o próximo bloqueio nervoso."""
+        if not self.nerve_block_ids:
+            self._load_nerve_blocks()
+
+        if self.nerve_block_ids:
+            self.nerve_block_idx = (self.nerve_block_idx + 1) % len(self.nerve_block_ids)
+            self._apply_nerve_block()
+
+    def _prev_nerve_block(self):
+        """Volta para o bloqueio nervoso anterior."""
+        if not self.nerve_block_ids:
+            self._load_nerve_blocks()
+
+        if self.nerve_block_ids:
+            self.nerve_block_idx = (self.nerve_block_idx - 1) % len(self.nerve_block_ids)
+            self._apply_nerve_block()
+
+    def _apply_nerve_block(self):
+        """Aplica o bloqueio nervoso selecionado."""
+        if not self.nerve_block_ids or self.ai is None:
+            return
+
+        block_id = self.nerve_block_ids[self.nerve_block_idx]
+        block_name = self.nerve_block_names.get(block_id, block_id)
+
+        try:
+            success = self.ai.set_nerve_block(block_id)
+            if success:
+                logger.info(f"Bloqueio: {block_name}")
+                print(f"NERVE TRACK: {block_name}")
+            self._invalidate_sidebar()
+        except Exception as e:
+            logger.error(f"Erro ao aplicar bloqueio: {e}")
+
+    def _toggle_nerve_block_menu(self):
+        """Mostra/esconde menu de seleção de bloqueio."""
+        self.nerve_block_show_menu = not self.nerve_block_show_menu
+        if self.nerve_block_show_menu and not self.nerve_block_ids:
+            self._load_nerve_blocks()
+        self._invalidate_sidebar()
+
+    def _get_current_nerve_block_name(self) -> str:
+        """Retorna o nome do bloqueio atualmente selecionado."""
+        if not self.nerve_block_ids:
+            return "Nenhum"
+        block_id = self.nerve_block_ids[self.nerve_block_idx]
+        return self.nerve_block_names.get(block_id, block_id)[:25]
 
     def _toggle_overlays(self):
         self.show_overlays = not self.show_overlays
@@ -1051,6 +1137,28 @@ class USGApp:
             if not ia_ativa:
                 btn.hover = False
             btn.desenhar(sidebar, pulse_phase)
+
+        # ═══════════════════════════════════════
+        # INFO DO BLOCO NERVOSO (quando NERVE ativo)
+        # ═══════════════════════════════════════
+        if ia_ativa and self.plugin_idx == 1 and self.nerve_block_ids:
+            # Posição abaixo do botão NERVE (índice 1)
+            nerve_btn = self.botoes_modo[1]
+            info_y = nerve_btn.y2 + 2
+
+            # Background sutil
+            cv2.rectangle(sidebar, (nerve_btn.x + 20, info_y),
+                         (nerve_btn.x2 - 10, info_y + 16), (28, 35, 40), -1)
+
+            # Ícone de nervo e nome do bloco
+            block_name = self._get_current_nerve_block_name()
+            cv2.putText(sidebar, f"→ {block_name}", (nerve_btn.x + 25, info_y + 11),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.32, (50, 220, 220), 1, cv2.LINE_AA)
+
+            # Indicador de navegação (< >)
+            nav_text = f"< {self.nerve_block_idx + 1}/{len(self.nerve_block_ids)} >"
+            cv2.putText(sidebar, nav_text, (nerve_btn.x2 - 60, info_y + 11),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.28, (100, 100, 120), 1, cv2.LINE_AA)
 
         # TÍTULO "RECORDING"
         cv2.line(sidebar, (30, self.recording_title_y), (self.SIDEBAR_W - 30, self.recording_title_y), (35, 35, 45), 1)
@@ -1465,6 +1573,104 @@ class USGApp:
 
         return frame
 
+    def _desenhar_nerve_block_menu(self, frame):
+        """Desenha menu de seleção de bloqueios nervosos (28 disponíveis)."""
+        if not self.nerve_block_show_menu:
+            return frame
+
+        h, w = frame.shape[:2]
+
+        # Agrupar bloqueios por região
+        regions = {
+            'CERVICAL': [],
+            'BRACHIAL': [],
+            'THORACIC': [],
+            'ABDOMEN': [],
+            'LOWER LIMB': []
+        }
+
+        for block_id in self.nerve_block_ids:
+            name = self.nerve_block_names.get(block_id, block_id)
+            # Determinar região pelo nome
+            name_lower = block_id.lower()
+            if any(x in name_lower for x in ['cervical', 'interescalenico', 'supraclavicular']):
+                regions['CERVICAL'].append((block_id, name))
+            elif any(x in name_lower for x in ['axilar', 'infraclavicular', 'radial', 'mediano', 'ulnar', 'braquial']):
+                regions['BRACHIAL'].append((block_id, name))
+            elif any(x in name_lower for x in ['paravertebral', 'serratus', 'pecs', 'intercostal', 'erector', 'esp']):
+                regions['THORACIC'].append((block_id, name))
+            elif any(x in name_lower for x in ['tap', 'quadratus', 'ilioinguinal', 'reto', 'abdominal']):
+                regions['ABDOMEN'].append((block_id, name))
+            else:
+                regions['LOWER LIMB'].append((block_id, name))
+
+        # Calcular tamanho do modal
+        total_items = sum(len(v) for v in regions.values()) + len([k for k, v in regions.items() if v])
+        line_h = min(22, max(16, (h - 200) // (total_items + 4)))
+        modal_h = min(h - 60, 80 + total_items * line_h + 60)
+        modal_w = min(w - 80, 500)
+        modal_x = (w - modal_w) // 2
+        modal_y = (h - modal_h) // 2
+
+        # Fundo escuro com borda cyan
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (modal_x, modal_y), (modal_x + modal_w, modal_y + modal_h), (15, 20, 25), -1)
+        cv2.addWeighted(overlay, 0.95, frame, 0.05, 0, frame)
+        cv2.rectangle(frame, (modal_x, modal_y), (modal_x + modal_w, modal_y + modal_h), (220, 220, 50), 2)
+
+        # Título
+        cv2.putText(frame, "NERVE TRACK - BLOQUEIOS", (modal_x + 20, modal_y + 32),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.6, (50, 220, 220), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"28 bloqueios nervosos disponíveis", (modal_x + 20, modal_y + 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (140, 140, 160), 1, cv2.LINE_AA)
+
+        # Desenhar regiões e bloqueios
+        y = modal_y + 75
+        region_colors = {
+            'CERVICAL': (100, 200, 255),
+            'BRACHIAL': (100, 255, 150),
+            'THORACIC': (255, 180, 100),
+            'ABDOMEN': (255, 120, 180),
+            'LOWER LIMB': (180, 140, 255)
+        }
+
+        current_block_id = self.nerve_block_ids[self.nerve_block_idx] if self.nerve_block_ids else None
+
+        for region_name, blocks in regions.items():
+            if not blocks:
+                continue
+
+            # Título da região
+            region_color = region_colors.get(region_name, (200, 200, 200))
+            cv2.putText(frame, f"▸ {region_name}", (modal_x + 15, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, region_color, 1, cv2.LINE_AA)
+            y += line_h
+
+            # Bloqueios da região
+            for block_id, block_name in blocks:
+                is_selected = (block_id == current_block_id)
+
+                # Background para item selecionado
+                if is_selected:
+                    cv2.rectangle(frame, (modal_x + 25, y - line_h + 4),
+                                 (modal_x + modal_w - 20, y + 2), (40, 60, 60), -1)
+
+                # Nome do bloqueio
+                text_color = (50, 220, 220) if is_selected else (160, 160, 170)
+                prefix = "● " if is_selected else "  "
+                display_name = block_name[:35] + "..." if len(block_name) > 35 else block_name
+                cv2.putText(frame, f"{prefix}{display_name}", (modal_x + 30, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, text_color, 1, cv2.LINE_AA)
+                y += line_h
+
+        # Instruções de navegação
+        y = modal_y + modal_h - 35
+        cv2.line(frame, (modal_x + 20, y - 10), (modal_x + modal_w - 20, y - 10), (40, 40, 50), 1)
+        cv2.putText(frame, "[</>] Navegar   [N] Fechar   [ENTER] Selecionar", (modal_x + 20, y + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 120), 1, cv2.LINE_AA)
+
+        return frame
+
     def _aplicar_zoom_pan(self, frame):
         """Aplica zoom e pan ao frame."""
         if self.zoom_level == 1.0 and self.pan_x == 0 and self.pan_y == 0:
@@ -1647,6 +1853,10 @@ class USGApp:
                 if self.show_help:
                     display = self._desenhar_ajuda(display)
 
+                # Menu de bloqueios nervosos
+                if self.nerve_block_show_menu:
+                    display = self._desenhar_nerve_block_menu(display)
+
             else:
                 # Tela de espera
                 if self.fullscreen:
@@ -1683,6 +1893,10 @@ class USGApp:
                 # Ajuda
                 if self.show_help:
                     display = self._desenhar_ajuda(display)
+
+                # Menu de bloqueios nervosos
+                if self.nerve_block_show_menu:
+                    display = self._desenhar_nerve_block_menu(display)
 
             cv2.imshow(self.janela, display)
 
@@ -1770,6 +1984,43 @@ class USGApp:
                     self._set_plugin(8)  # LUNG
             elif k == ord('v'):
                 self._set_plugin(9)  # BLADDER
+            # ═══════════════════════════════════════════════════════════════════════
+            # CALIBRAÇÃO - Ajuste de profundidade (FASE 3 NEEDLE PILOT)
+            # ═══════════════════════════════════════════════════════════════════════
+            elif k == ord('['):
+                # Diminuir profundidade
+                current = self.ai_processor.calibration['depth_mm']
+                new_depth = max(20, current - 10)
+                self.ai_processor.set_ultrasound_depth(new_depth)
+                print(f"📐 Profundidade: {new_depth}mm")
+            elif k == ord(']'):
+                # Aumentar profundidade
+                current = self.ai_processor.calibration['depth_mm']
+                new_depth = min(200, current + 10)
+                self.ai_processor.set_ultrasound_depth(new_depth)
+                print(f"Profundidade: {new_depth}mm")
+
+            # ═══════════════════════════════════════════════════════════════════════
+            # NERVE TRACK v2.0 - Navegação de Bloqueios (<, >, n)
+            # ═══════════════════════════════════════════════════════════════════════
+            elif k == ord(',') or k == ord('<'):
+                # Bloqueio anterior (quando NERVE ativo)
+                if self.plugin_idx == 1:  # NERVE
+                    self._prev_nerve_block()
+            elif k == ord('.') or k == ord('>'):
+                # Próximo bloqueio (quando NERVE ativo)
+                if self.plugin_idx == 1:  # NERVE
+                    self._next_nerve_block()
+            elif k == ord('n'):
+                # Mostrar/esconder menu de bloqueios (quando NERVE ativo)
+                if self.plugin_idx == 1:  # NERVE
+                    self._toggle_nerve_block_menu()
+            elif k == 13 or k == 10:  # ENTER
+                # Selecionar bloco atual e fechar menu
+                if self.nerve_block_show_menu:
+                    self._apply_nerve_block()
+                    self.nerve_block_show_menu = False
+                    self._invalidate_sidebar()
 
         # Cleanup - parar todas as threads
         if self.recording:

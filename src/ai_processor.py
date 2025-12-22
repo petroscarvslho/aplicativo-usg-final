@@ -16,7 +16,166 @@ from typing import Optional, Dict, List, Tuple, Any, Deque
 from collections import deque
 import config
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# KALMAN FILTER para Needle Tracking (Fase 1 - Otimização Premium)
+# ═══════════════════════════════════════════════════════════════════════════════
+from filterpy.kalman import KalmanFilter
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NERVE TRACK v2.0 PREMIUM - Sistema Avançado de Detecção de Nervos
+# ═══════════════════════════════════════════════════════════════════════════════
+try:
+    from nerve_track import (
+        NerveTrackSystem,
+        create_nerve_track_system,
+        NerveTracker,
+        StructureClassifier,
+        NerveIdentifier,
+        PremiumVisualRenderer,
+        get_block_config,
+        get_all_block_ids,
+        ALL_NERVE_BLOCKS,
+        BLOCK_NAMES,
+        HAS_MODEL as NERVE_HAS_MODEL,
+    )
+    NERVE_TRACK_AVAILABLE = True
+    logger.info("NERVE TRACK v2.0 carregado com sucesso")
+except ImportError as e:
+    NERVE_TRACK_AVAILABLE = False
+    logger.warning(f"NERVE TRACK v2.0 não disponível: {e}")
+
+# Atlas Educacional (funciona SEM modelo treinado)
+try:
+    from nerve_track import (
+        EducationalAtlas,
+        create_educational_atlas,
+        HAS_ATLAS as NERVE_HAS_ATLAS,
+    )
+    EDUCATIONAL_ATLAS_AVAILABLE = True
+    logger.info("Atlas Educacional carregado com sucesso")
+except ImportError:
+    EDUCATIONAL_ATLAS_AVAILABLE = False
+    logger.info("Atlas Educacional não disponível")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RANSAC para Detecção Robusta de Agulha (Fase 2 - Otimização Premium)
+# ═══════════════════════════════════════════════════════════════════════════════
+from sklearn.linear_model import RANSACRegressor
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VASST CNN - Detecção de Centroide de Agulha (Fase 4 - Otimização Premium)
+# ═══════════════════════════════════════════════════════════════════════════════
+import torch.nn as nn
+import torch.nn.functional as F
+
 logger = logging.getLogger('USG_FLOW.AI')
+
+
+class VASSTPyTorch(nn.Module):
+    """
+    VASST CNN para detecção de centroide de agulha em PyTorch.
+
+    Baseado no paper: "CNN-based Needle Localization for Ultrasound-Guided Interventions"
+    Repositório original: https://github.com/VASST/AECAI.CNN-US-Needle-Segmentation
+
+    Arquitetura:
+    - 5 camadas Conv2D com LeakyReLU e MaxPool
+    - Flatten + 3 camadas Dense
+    - Saída: coordenadas (x, y) normalizadas em [-1, 1]
+
+    Input: Imagem grayscale (1, H, W)
+    Output: Coordenadas (x, y) do centroide da agulha
+    """
+
+    def __init__(self, input_shape: Tuple[int, int] = (256, 256)):
+        super(VASSTPyTorch, self).__init__()
+
+        self.input_shape = input_shape
+
+        # Bloco de convolução
+        self.conv0 = nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(16, 32, kernel_size=2, stride=1, padding=0)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=2, stride=1, padding=0)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=2, stride=1, padding=0)
+        self.conv4 = nn.Conv2d(128, 256, kernel_size=2, stride=1, padding=0)
+
+        self.pool = nn.MaxPool2d(2, 2)
+        self.leaky = nn.LeakyReLU(0.01)
+
+        # Calcular tamanho do flatten
+        self._calculate_flatten_size()
+
+        # Camadas densas
+        self.fc0 = nn.Linear(self.flatten_size, 1024)
+        self.fc1 = nn.Linear(1024, 128)
+        self.fc2 = nn.Linear(128, 16)
+        self.output = nn.Linear(16, 2)  # (x, y)
+
+    def _calculate_flatten_size(self):
+        """Calcula o tamanho após todas as convoluções."""
+        x = torch.zeros(1, 1, self.input_shape[0], self.input_shape[1])
+        x = self.pool(self.leaky(self.conv0(x)))
+        x = self.pool(self.leaky(self.conv1(x)))
+        x = self.pool(self.leaky(self.conv2(x)))
+        x = self.pool(self.leaky(self.conv3(x)))
+        x = self.pool(self.leaky(self.conv4(x)))
+        self.flatten_size = x.view(1, -1).size(1)
+
+    def forward(self, x):
+        # Convoluções
+        x = self.pool(self.leaky(self.conv0(x)))
+        x = self.pool(self.leaky(self.conv1(x)))
+        x = self.pool(self.leaky(self.conv2(x)))
+        x = self.pool(self.leaky(self.conv3(x)))
+        x = self.pool(self.leaky(self.conv4(x)))
+
+        # Flatten
+        x = x.view(x.size(0), -1)
+
+        # Camadas densas
+        x = self.leaky(self.fc0(x))
+        x = self.leaky(self.fc1(x))
+        x = self.leaky(self.fc2(x))
+        x = self.output(x)  # Linear activation
+
+        return x
+
+    def predict_centroid(self, image: np.ndarray) -> Tuple[float, float]:
+        """
+        Prediz o centroide da agulha em uma imagem.
+
+        Args:
+            image: Imagem grayscale (H, W) ou BGR (H, W, 3)
+
+        Returns:
+            (x, y): Coordenadas do centroide em pixels
+        """
+        self.eval()
+
+        # Converter para grayscale se necessário
+        if len(image.shape) == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        h, w = image.shape
+
+        # Resize para input_shape
+        resized = cv2.resize(image, self.input_shape)
+
+        # Normalizar para [0, 1]
+        normalized = resized.astype(np.float32) / 255.0
+
+        # Converter para tensor
+        tensor = torch.from_numpy(normalized).unsqueeze(0).unsqueeze(0)
+
+        with torch.no_grad():
+            output = self.forward(tensor)
+
+        # Converter de [-1, 1] para coordenadas de pixel
+        x_norm, y_norm = output[0].numpy()
+        x = (x_norm + 1) / 2 * w
+        y = (y_norm + 1) / 2 * h
+
+        return float(x), float(y)
 
 
 class TemporalSmoother:
@@ -288,7 +447,712 @@ class AIProcessor:
         self.bladder_pvr_mode = False
         self.bladder_pre_void = None
 
-        logger.info("AI Processor inicializado com otimizacoes")
+        # ═══════════════════════════════════════════════════════════════════════
+        # NERVE TRACK v2.0 PREMIUM - Sistema Avançado de Detecção de Nervos
+        # ═══════════════════════════════════════════════════════════════════════
+        # Sistema completo com:
+        # - U-Net++ + CBAM + ConvLSTM para segmentação
+        # - Kalman Filter para tracking temporal
+        # - Classificador Nervo/Artéria/Veia
+        # - Identificador de nervos específicos por bloqueio
+        # - Medição automática de CSA
+        # - Visual premium por tipo de bloqueio
+        # ═══════════════════════════════════════════════════════════════════════
+        self.nerve_track_system = None
+        self.nerve_block_id = None  # Tipo de bloqueio selecionado
+        self.nerve_track_available = False
+
+        if NERVE_TRACK_AVAILABLE:
+            try:
+                # Calcular mm_per_pixel baseado na calibração
+                mm_per_pixel = config.MM_PER_PIXEL if hasattr(config, 'MM_PER_PIXEL') else 0.1
+
+                self.nerve_track_system = create_nerve_track_system(
+                    block_id=None,  # Será definido pelo usuário
+                    mm_per_pixel=mm_per_pixel,
+                    use_model=True,
+                    use_temporal=True,
+                    device='auto'
+                )
+                self.nerve_track_available = True
+                logger.info("NERVE TRACK v2.0 inicializado com sucesso")
+            except Exception as e:
+                logger.warning(f"Erro ao inicializar NERVE TRACK v2.0: {e}")
+                self.nerve_track_available = False
+
+        # Lista de bloqueios disponíveis (para UI)
+        self.available_nerve_blocks = {}
+        if NERVE_TRACK_AVAILABLE:
+            try:
+                self.available_nerve_blocks = BLOCK_NAMES
+            except:
+                pass
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # ATLAS EDUCACIONAL - Funciona SEM modelo treinado
+        # ═══════════════════════════════════════════════════════════════════════
+        self.educational_atlas = None
+        self.atlas_mode = "side"  # "side", "overlay", "full"
+
+        if EDUCATIONAL_ATLAS_AVAILABLE:
+            try:
+                mm_per_pixel = config.MM_PER_PIXEL if hasattr(config, 'MM_PER_PIXEL') else 0.1
+                self.educational_atlas = create_educational_atlas(mm_per_pixel=mm_per_pixel)
+                logger.info("Atlas Educacional inicializado")
+            except Exception as e:
+                logger.warning(f"Erro ao inicializar Atlas Educacional: {e}")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # KALMAN FILTER - Needle Tracking Premium (Fase 1)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Estado: [x, y, vx, vy, angle, v_angle]
+        # - x, y: posição da ponta da agulha (pixels)
+        # - vx, vy: velocidade da ponta (pixels/frame)
+        # - angle: ângulo da agulha (graus)
+        # - v_angle: velocidade angular (graus/frame)
+        # ═══════════════════════════════════════════════════════════════════════
+        self.needle_kalman = self._create_needle_kalman()
+        self.kalman_initialized = False
+        self.frames_without_detection = 0
+        self.max_prediction_frames = 10  # Máximo de frames para predizer sem detecção
+        self.kalman_confidence = 0.0  # Confiança atual do Kalman
+        self.needle_tracking_mode = 'searching'  # 'searching', 'tracking', 'predicting'
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SISTEMA DE CALIBRAÇÃO - Escala mm/pixel (Fase 3)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Converte pixels em milímetros reais baseado na profundidade do US
+        # ═══════════════════════════════════════════════════════════════════════
+        self.calibration = {
+            'mode': config.CALIBRATION_MODE,
+            'depth_mm': config.ULTRASOUND_DEPTH_MM,
+            'mm_per_pixel': config.MM_PER_PIXEL,
+            'top_offset': config.IMAGE_TOP_OFFSET,
+            'image_height': None,  # Será definido no primeiro frame
+            'is_calibrated': False,
+        }
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # VASST CNN - Detecção de Centroide (Fase 4)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Modelo CNN para refinar a posição do centroide da agulha
+        # Especialmente útil para agulhas out-of-plane (perpendiculares)
+        # ═══════════════════════════════════════════════════════════════════════
+        self.vasst_model = None
+        self.vasst_available = False
+        self.vasst_weights_path = 'models/vasst_needle.pt'
+        self.use_vasst_refinement = True  # Usar refinamento CV quando VASST não disponível
+        self._try_load_vasst()
+
+        logger.info("AI Processor inicializado com otimizações: Kalman + RANSAC + Calibração + VASST")
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # KALMAN FILTER - Métodos (Fase 1 - Otimização Premium)
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _create_needle_kalman(self) -> KalmanFilter:
+        """
+        Cria Kalman Filter para tracking de agulha.
+
+        O Kalman Filter é um algoritmo que:
+        1. SUAVIZA posições ruidosas (agulha para de tremer)
+        2. PREDIZ posição quando a detecção falha (agulha "some")
+        3. USA FÍSICA do movimento para estimar posições futuras
+
+        Estado (6 variáveis):
+        - x, y: posição da ponta da agulha em pixels
+        - vx, vy: velocidade da ponta em pixels/frame
+        - angle: ângulo da agulha em graus
+        - v_angle: velocidade angular em graus/frame
+
+        Medição (3 variáveis):
+        - x, y: posição detectada
+        - angle: ângulo detectado
+
+        Returns:
+            KalmanFilter configurado para needle tracking
+        """
+        kf = KalmanFilter(dim_x=6, dim_z=3)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # MATRIZ DE TRANSIÇÃO DE ESTADO (F)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Define como o estado evolui de um frame para o próximo
+        # Assume modelo de velocidade constante
+        dt = 1.0 / 30.0  # ~30 FPS (ajustar se necessário)
+
+        kf.F = np.array([
+            [1, 0, dt, 0,  0,  0 ],   # x_new = x + vx * dt
+            [0, 1, 0,  dt, 0,  0 ],   # y_new = y + vy * dt
+            [0, 0, 1,  0,  0,  0 ],   # vx_new = vx (velocidade constante)
+            [0, 0, 0,  1,  0,  0 ],   # vy_new = vy
+            [0, 0, 0,  0,  1,  dt],   # angle_new = angle + v_angle * dt
+            [0, 0, 0,  0,  0,  1 ],   # v_angle_new = v_angle
+        ])
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # MATRIZ DE MEDIÇÃO (H)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Define quais variáveis de estado conseguimos medir diretamente
+        # Medimos: x, y, angle (não medimos velocidades diretamente)
+
+        kf.H = np.array([
+            [1, 0, 0, 0, 0, 0],   # Medimos x
+            [0, 1, 0, 0, 0, 0],   # Medimos y
+            [0, 0, 0, 0, 1, 0],   # Medimos angle
+        ])
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # COVARIÂNCIA DO PROCESSO (Q)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Representa a incerteza no modelo de movimento
+        # Valores maiores = modelo menos confiável = responde mais rápido a mudanças
+
+        kf.Q = np.eye(6)
+        kf.Q[0, 0] = 0.1    # Incerteza em x (posição muda pouco sozinha)
+        kf.Q[1, 1] = 0.1    # Incerteza em y
+        kf.Q[2, 2] = 1.0    # Incerteza em vx (velocidade pode mudar)
+        kf.Q[3, 3] = 1.0    # Incerteza em vy
+        kf.Q[4, 4] = 0.5    # Incerteza em angle
+        kf.Q[5, 5] = 0.5    # Incerteza em v_angle
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # COVARIÂNCIA DA MEDIÇÃO (R)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Representa a incerteza nas detecções
+        # Valores maiores = detecção menos confiável = suaviza mais
+
+        kf.R = np.array([
+            [5.0, 0,   0  ],   # Incerteza em x: ~5 pixels
+            [0,   5.0, 0  ],   # Incerteza em y: ~5 pixels
+            [0,   0,   3.0],   # Incerteza em angle: ~3 graus
+        ])
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # COVARIÂNCIA INICIAL (P)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Alta incerteza inicial (não sabemos onde a agulha está)
+
+        kf.P *= 1000
+
+        # Estado inicial zerado (será sobrescrito na primeira detecção)
+        kf.x = np.zeros((6, 1))
+
+        return kf
+
+    def _update_needle_kalman(self, detected: bool, tip_x: float, tip_y: float,
+                               angle: float) -> Tuple[Optional[float], Optional[float],
+                                                       Optional[float], float]:
+        """
+        Atualiza o Kalman Filter com nova medição ou faz predição.
+
+        Este método é o CORAÇÃO do sistema de tracking:
+        1. Se detectou agulha → atualiza Kalman com medição → retorna posição suavizada
+        2. Se NÃO detectou → usa Kalman para PREDIZER posição → retorna predição
+
+        Args:
+            detected: True se a agulha foi detectada neste frame
+            tip_x: coordenada X da ponta detectada (ignorado se detected=False)
+            tip_y: coordenada Y da ponta detectada (ignorado se detected=False)
+            angle: ângulo da agulha em graus (ignorado se detected=False)
+
+        Returns:
+            Tupla (x, y, angle, confidence):
+            - x, y: posição suavizada ou predita (None se não há tracking)
+            - angle: ângulo suavizado ou predito
+            - confidence: confiança de 0.0 a 1.0
+        """
+        if detected:
+            # ═══════════════════════════════════════════════════════════════════
+            # CASO 1: Agulha detectada → Atualizar Kalman
+            # ═══════════════════════════════════════════════════════════════════
+
+            # Resetar contador de frames sem detecção
+            self.frames_without_detection = 0
+            self.needle_tracking_mode = 'tracking'
+
+            if not self.kalman_initialized:
+                # Primeira detecção - inicializar estado
+                self.needle_kalman.x = np.array([
+                    [tip_x],    # x
+                    [tip_y],    # y
+                    [0.0],      # vx (velocidade inicial zero)
+                    [0.0],      # vy
+                    [angle],    # angle
+                    [0.0],      # v_angle
+                ])
+                self.kalman_initialized = True
+                self.kalman_confidence = 1.0
+                logger.debug(f"Kalman inicializado em ({tip_x:.1f}, {tip_y:.1f})")
+                return tip_x, tip_y, angle, 1.0
+
+            # Passo 1: Predição (baseado no modelo de movimento)
+            self.needle_kalman.predict()
+
+            # Passo 2: Atualização com a medição
+            z = np.array([[tip_x], [tip_y], [angle]])
+            self.needle_kalman.update(z)
+
+            # Extrair estado suavizado
+            state = self.needle_kalman.x
+            smooth_x = float(state[0, 0])
+            smooth_y = float(state[1, 0])
+            smooth_angle = float(state[4, 0])
+
+            self.kalman_confidence = 1.0
+            return smooth_x, smooth_y, smooth_angle, 1.0
+
+        else:
+            # ═══════════════════════════════════════════════════════════════════
+            # CASO 2: Agulha NÃO detectada → Usar predição
+            # ═══════════════════════════════════════════════════════════════════
+
+            self.frames_without_detection += 1
+
+            if not self.kalman_initialized:
+                # Nunca detectamos nada - não há o que predizer
+                self.needle_tracking_mode = 'searching'
+                self.kalman_confidence = 0.0
+                return None, None, None, 0.0
+
+            if self.frames_without_detection > self.max_prediction_frames:
+                # Muitos frames sem detecção - perder tracking
+                # (agulha provavelmente saiu do campo de visão)
+                self.kalman_initialized = False
+                self.needle_tracking_mode = 'searching'
+                self.kalman_confidence = 0.0
+                logger.debug("Kalman: tracking perdido após muitos frames sem detecção")
+                return None, None, None, 0.0
+
+            # Ainda dentro do limite - fazer predição
+            self.needle_tracking_mode = 'predicting'
+
+            # Apenas predição (sem update porque não temos medição)
+            self.needle_kalman.predict()
+
+            # Confiança decai linearmente com o tempo sem detecção
+            self.kalman_confidence = 1.0 - (self.frames_without_detection /
+                                             self.max_prediction_frames)
+
+            # Extrair estado predito
+            state = self.needle_kalman.x
+            pred_x = float(state[0, 0])
+            pred_y = float(state[1, 0])
+            pred_angle = float(state[4, 0])
+
+            return pred_x, pred_y, pred_angle, self.kalman_confidence
+
+    def _reset_needle_kalman(self) -> None:
+        """
+        Reseta o Kalman Filter para estado inicial.
+        Útil quando o usuário quer reiniciar o tracking.
+        """
+        self.needle_kalman = self._create_needle_kalman()
+        self.kalman_initialized = False
+        self.frames_without_detection = 0
+        self.kalman_confidence = 0.0
+        self.needle_tracking_mode = 'searching'
+        logger.debug("Kalman Filter resetado")
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # RANSAC - FASE 2: Detecção Robusta de Linha (Remove Outliers)
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _ransac_fit_needle(self, points: List[Tuple[int, int]],
+                           min_samples: int = 3) -> Optional[Tuple[int, int, int, int, int]]:
+        """
+        Usa RANSAC para encontrar a melhor linha entre pontos detectados.
+
+        O RANSAC (Random Sample Consensus) é robusto a outliers - ignora
+        detecções falsas e encontra a linha que melhor representa a agulha.
+
+        Args:
+            points: lista de (x, y) dos pontos detectados por Hough
+            min_samples: mínimo de pontos para considerar válido
+
+        Returns:
+            (x1, y1, x2, y2, inliers_count): linha ajustada e quantidade de inliers
+            ou None se não conseguir ajustar
+        """
+        if len(points) < min_samples:
+            return None
+
+        # Separar X e Y
+        X = np.array([p[0] for p in points]).reshape(-1, 1)
+        y = np.array([p[1] for p in points])
+
+        try:
+            # RANSAC para regressão linear
+            ransac = RANSACRegressor(
+                min_samples=min_samples,
+                residual_threshold=10.0,  # pixels de tolerância
+                max_trials=100,
+                random_state=42  # Reprodutibilidade
+            )
+            ransac.fit(X, y)
+
+            # Obter inliers (pontos que fazem parte da linha)
+            inlier_mask = ransac.inlier_mask_
+            inliers_count = int(np.sum(inlier_mask))
+
+            if inliers_count < min_samples:
+                return None
+
+            # Calcular extremos da linha usando apenas inliers
+            X_inliers = X[inlier_mask]
+            x_min, x_max = float(X_inliers.min()), float(X_inliers.max())
+
+            # Prever Y nos extremos
+            y_min = float(ransac.predict([[x_min]])[0])
+            y_max = float(ransac.predict([[x_max]])[0])
+
+            return (int(x_min), int(y_min), int(x_max), int(y_max), inliers_count)
+
+        except Exception as e:
+            logger.debug(f"RANSAC falhou: {e}")
+            return None
+
+    def _detect_needle_enhanced(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int, int, float]]:
+        """
+        Detecção de agulha melhorada com RANSAC.
+
+        Pipeline:
+        1. Melhora contraste com CLAHE
+        2. Detecta edges com Canny
+        3. Encontra linhas candidatas com HoughLinesP
+        4. Filtra por ângulo típico de agulha
+        5. Coleta pontos ao longo das linhas
+        6. Usa RANSAC para encontrar a melhor linha
+
+        Args:
+            frame: Frame BGR para processar
+
+        Returns:
+            (x1, y1, x2, y2, inliers, confidence) ou None
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Aplicar CLAHE para melhorar contraste em regiões escuras
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        # Detectar edges
+        edges = cv2.Canny(enhanced, 50, 150, apertureSize=3)
+
+        # Encontrar linhas candidatas
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi/180,
+            threshold=30,  # Mais sensível
+            minLineLength=40,
+            maxLineGap=15
+        )
+
+        if lines is None:
+            return None
+
+        # Coletar pontos de linhas com ângulo típico de agulha (15-75° ou 105-165°)
+        needle_points = []
+        line_scores = []
+
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            angle = abs(np.arctan2(y2-y1, x2-x1) * 180 / np.pi)
+            length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+
+            # Filtrar por ângulo típico de agulha
+            if 15 < angle < 75 or 105 < angle < 165:
+                # Score baseado em comprimento e proximidade de 45°
+                score = length * (1 - abs(angle - 45) / 45)
+                line_scores.append(score)
+
+                # Adicionar pontos ao longo da linha para RANSAC
+                num_points = max(5, int(length / 10))
+                for t in np.linspace(0, 1, num_points):
+                    px = int(x1 + t * (x2 - x1))
+                    py = int(y1 + t * (y2 - y1))
+                    needle_points.append((px, py))
+
+        if len(needle_points) < 5:
+            return None
+
+        # Aplicar RANSAC
+        result = self._ransac_fit_needle(needle_points)
+
+        if result is None:
+            return None
+
+        x1, y1, x2, y2, inliers = result
+
+        # Calcular confiança baseada em inliers e qualidade das linhas originais
+        conf = min(0.95, inliers / 20)  # Mais inliers = mais confiança
+        if line_scores:
+            avg_score = np.mean(line_scores)
+            conf = conf * min(1.0, avg_score / 100)
+
+        return (x1, y1, x2, y2, inliers, conf)
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # CALIBRAÇÃO - FASE 3: Conversão pixel ↔ milímetros
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _calibrate_scale(self, frame_height: int) -> float:
+        """
+        Calcula a escala mm/pixel baseado na configuração.
+
+        Em modo "auto", calcula baseado na altura do frame e profundidade configurada.
+        Em modo "manual", usa o valor fixo de mm_per_pixel.
+
+        Args:
+            frame_height: altura do frame em pixels
+
+        Returns:
+            mm_per_pixel: escala calculada
+        """
+        self.calibration['image_height'] = frame_height
+
+        if self.calibration['mode'] == 'auto':
+            # Altura útil (descontando offset do topo)
+            useful_height = frame_height - self.calibration['top_offset']
+
+            if useful_height > 0:
+                # Calcular escala: mm_total / pixels_totais
+                mm_per_pixel = self.calibration['depth_mm'] / useful_height
+                self.calibration['mm_per_pixel'] = mm_per_pixel
+                self.calibration['is_calibrated'] = True
+            else:
+                # Fallback se altura inválida
+                self.calibration['mm_per_pixel'] = config.MM_PER_PIXEL
+                self.calibration['is_calibrated'] = False
+
+        else:
+            # Modo manual - usa valor fixo
+            self.calibration['mm_per_pixel'] = config.MM_PER_PIXEL
+            self.calibration['is_calibrated'] = True
+
+        return self.calibration['mm_per_pixel']
+
+    def _pixel_to_mm(self, pixel_y: int) -> float:
+        """
+        Converte posição Y em pixels para profundidade em mm.
+
+        Args:
+            pixel_y: posição Y em pixels (do topo da imagem)
+
+        Returns:
+            depth_mm: profundidade em milímetros
+        """
+        adjusted_y = pixel_y - self.calibration['top_offset']
+        return max(0, adjusted_y * self.calibration['mm_per_pixel'])
+
+    def _mm_to_pixel(self, depth_mm: float) -> int:
+        """
+        Converte profundidade em mm para posição Y em pixels.
+
+        Args:
+            depth_mm: profundidade em milímetros
+
+        Returns:
+            pixel_y: posição Y em pixels
+        """
+        if self.calibration['mm_per_pixel'] > 0:
+            return int(depth_mm / self.calibration['mm_per_pixel']) + self.calibration['top_offset']
+        return 0
+
+    def set_ultrasound_depth(self, depth_mm: int) -> None:
+        """
+        Define a profundidade do ultrassom (chamado pelos atalhos [ e ]).
+
+        Args:
+            depth_mm: profundidade total em milímetros
+        """
+        self.calibration['depth_mm'] = max(10, min(300, depth_mm))
+        # Forçar recalibração no próximo frame
+        if self.calibration['image_height']:
+            self._calibrate_scale(self.calibration['image_height'])
+        logger.info(f"Profundidade ajustada para {self.calibration['depth_mm']}mm")
+
+    def get_calibration_info(self) -> Dict[str, Any]:
+        """
+        Retorna informações de calibração para exibição.
+
+        Returns:
+            Dict com informações de calibração
+        """
+        return {
+            'depth_mm': self.calibration['depth_mm'],
+            'mm_per_pixel': self.calibration['mm_per_pixel'],
+            'mode': self.calibration['mode'],
+            'is_calibrated': self.calibration['is_calibrated'],
+        }
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # VASST CNN - FASE 4: Refinamento de Centroide
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _try_load_vasst(self) -> None:
+        """
+        Tenta carregar o modelo VASST CNN.
+        Se não houver weights disponíveis, marca como indisponível.
+        """
+        if os.path.exists(self.vasst_weights_path):
+            try:
+                self.vasst_model = VASSTPyTorch()
+                self.vasst_model.load_state_dict(torch.load(self.vasst_weights_path, map_location=self.device))
+                self.vasst_model.to(self.device)
+                self.vasst_model.eval()
+                self.vasst_available = True
+                logger.info("VASST CNN carregado com sucesso")
+            except Exception as e:
+                logger.warning(f"Falha ao carregar VASST: {e}")
+                self.vasst_available = False
+        else:
+            logger.info("VASST weights não encontrados - usando refinamento CV")
+            self.vasst_available = False
+
+    def _vasst_predict_centroid(self, frame: np.ndarray) -> Optional[Tuple[float, float]]:
+        """
+        Usa VASST CNN para predizer o centroide da agulha.
+
+        Args:
+            frame: Frame BGR
+
+        Returns:
+            (x, y) do centroide ou None se não conseguir
+        """
+        if self.vasst_available and self.vasst_model is not None:
+            try:
+                x, y = self.vasst_model.predict_centroid(frame)
+                return (x, y)
+            except Exception as e:
+                logger.debug(f"VASST prediction failed: {e}")
+                return None
+        return None
+
+    def _cv_refine_centroid(self, frame: np.ndarray, initial_tip: Tuple[int, int],
+                            search_radius: int = 30) -> Tuple[int, int, float]:
+        """
+        Refina a posição do centroide usando técnicas CV avançadas.
+
+        Este método é usado como fallback quando VASST não está disponível.
+        Analisa a região ao redor da ponta detectada para encontrar
+        o ponto mais provável de ser o centroide real.
+
+        Técnicas utilizadas:
+        1. CLAHE para melhor contraste
+        2. Gradiente de Sobel para detectar bordas
+        3. Análise de intensidade local
+        4. Ponderação por distância do ponto inicial
+
+        Args:
+            frame: Frame BGR
+            initial_tip: Posição inicial da ponta (x, y)
+            search_radius: Raio de busca em pixels
+
+        Returns:
+            (x, y, confidence): Centroide refinado e confiança
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+
+        # Aplicar CLAHE
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        # Calcular gradientes
+        grad_x = cv2.Sobel(enhanced, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(enhanced, cv2.CV_64F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+
+        # Definir região de busca
+        x0, y0 = initial_tip
+        x_min = max(0, x0 - search_radius)
+        x_max = min(w, x0 + search_radius)
+        y_min = max(0, y0 - search_radius)
+        y_max = min(h, y0 + search_radius)
+
+        # Extrair região
+        roi_grad = grad_mag[y_min:y_max, x_min:x_max]
+        roi_intensity = enhanced[y_min:y_max, x_min:x_max]
+
+        if roi_grad.size == 0:
+            return initial_tip[0], initial_tip[1], 0.5
+
+        # Criar mapa de pesos
+        # Combinar: alto gradiente + alta intensidade + proximidade do centro
+        roi_h, roi_w = roi_grad.shape
+        cy, cx = roi_h // 2, roi_w // 2
+        y_coords, x_coords = np.ogrid[:roi_h, :roi_w]
+        distance_map = np.sqrt((x_coords - cx)**2 + (y_coords - cy)**2)
+        distance_weight = 1 - (distance_map / (search_radius * 1.5))
+        distance_weight = np.clip(distance_weight, 0, 1)
+
+        # Normalizar gradiente e intensidade
+        grad_norm = roi_grad / (roi_grad.max() + 1e-6)
+        intensity_norm = roi_intensity / 255.0
+
+        # Score combinado
+        # Para agulhas: alto gradiente (borda) e alta intensidade (reflexão)
+        score_map = (0.5 * grad_norm + 0.3 * intensity_norm + 0.2 * distance_weight)
+
+        # Encontrar máximo
+        max_idx = np.unravel_index(np.argmax(score_map), score_map.shape)
+        refined_y = y_min + max_idx[0]
+        refined_x = x_min + max_idx[1]
+
+        # Calcular confiança baseada no score máximo
+        confidence = float(np.max(score_map))
+
+        return refined_x, refined_y, confidence
+
+    def _refine_needle_position(self, frame: np.ndarray, detected_tip: Tuple[int, int],
+                                 detected_line: Optional[Tuple[int, int, int, int]]) -> Tuple[int, int, float]:
+        """
+        Refina a posição da ponta da agulha usando VASST ou CV.
+
+        Este é o método principal que decide qual técnica usar:
+        1. Se VASST disponível → usa CNN
+        2. Senão → usa refinamento CV
+
+        Args:
+            frame: Frame BGR
+            detected_tip: Ponta detectada (x, y)
+            detected_line: Linha detectada (x1, y1, x2, y2) ou None
+
+        Returns:
+            (x, y, confidence): Posição refinada e confiança
+        """
+        # Tentar VASST primeiro
+        if self.vasst_available:
+            vasst_result = self._vasst_predict_centroid(frame)
+            if vasst_result is not None:
+                # VASST retorna o centroide - precisamos estimar a ponta
+                # Para isso, usamos a direção da linha detectada
+                cx, cy = vasst_result
+
+                if detected_line is not None:
+                    x1, y1, x2, y2 = detected_line
+                    dx, dy = x2 - x1, y2 - y1
+                    length = np.sqrt(dx**2 + dy**2)
+
+                    if length > 0:
+                        # Mover do centroide para a ponta
+                        ux, uy = dx / length, dy / length
+                        tip_x = cx + ux * length * 0.4  # Aproximar ponta
+                        tip_y = cy + uy * length * 0.4
+
+                        return int(tip_x), int(tip_y), 0.95
+
+                return int(cx), int(cy), 0.85
+
+        # Fallback: refinamento CV
+        if self.use_vasst_refinement:
+            refined_x, refined_y, conf = self._cv_refine_centroid(frame, detected_tip)
+            return refined_x, refined_y, conf
+
+        # Sem refinamento
+        return detected_tip[0], detected_tip[1], 0.7
 
     def set_mode(self, mode: Optional[str]) -> None:
         """Define modo ativo e carrega modelo se necessario."""
@@ -628,19 +1492,47 @@ class AIProcessor:
     # =========================================================================
 
     def _process_needle(self, frame):
-        """Needle Pilot - Sistema avancado de guia de agulha estilo Clarius."""
+        """
+        Needle Pilot Premium - Sistema avançado de guia de agulha.
+
+        NEEDLE PILOT v3.1 PREMIUM - TODAS AS OTIMIZAÇÕES IMPLEMENTADAS:
+        ═══════════════════════════════════════════════════════════════════════
+        ✅ FASE 1 - Kalman Filter: suavização e predição de posição
+        ✅ FASE 1 - Tracking contínuo quando agulha some temporariamente
+        ✅ FASE 1 - Visual premium com indicador de modo (TRACKING/PREDICTING)
+        ✅ FASE 2 - RANSAC: detecção robusta de linha (remove outliers)
+        ✅ FASE 2 - CLAHE: melhora contraste em regiões escuras
+        ✅ FASE 2 - Confiança baseada em inliers do RANSAC
+        ✅ FASE 3 - Calibração: conversão pixel ↔ mm real
+        ✅ FASE 3 - Escala lateral com marcações calibradas
+        ✅ FASE 3 - Profundidade ajustável com atalhos [ e ]
+        ✅ FASE 4 - VASST CNN: refinamento de centroide (pronto para weights)
+        ✅ FASE 4 - Fallback CV: refinamento por gradiente quando CNN indisponível
+        ✅ FASE 5 - Elipse de incerteza (covariância do Kalman)
+        ✅ FASE 5 - Info de calibração no painel
+        ✅ FASE 5 - Trail com cores por confiança
+        ═══════════════════════════════════════════════════════════════════════
+        """
         model = self.models.get('needle')
         output = frame.copy()
         h, w = frame.shape[:2]
 
-        detected_needle = False
-        needle_angle = None
-        needle_depth = None
-        needle_tip = None
-        confidence = 0
+        # ═══════════════════════════════════════════════════════════════════════
+        # ETAPA 0: CALIBRAÇÃO (FASE 3)
+        # ═══════════════════════════════════════════════════════════════════════
+        self._calibrate_scale(h)
 
-        # Deteccao por modelo ou CV
+        # ═══════════════════════════════════════════════════════════════════════
+        # ETAPA 1: DETECÇÃO (YOLO ou CV)
+        # ═══════════════════════════════════════════════════════════════════════
+        raw_detected = False
+        raw_tip_x, raw_tip_y = 0, 0
+        raw_angle = 0
+        raw_confidence = 0
+        raw_line = None  # (x1, y1, x2, y2)
+
         if model:
+            # Detecção com YOLO
             config_mode = self.MODE_CONFIG['needle']
             scaled, scale = self._scale_frame(frame, config_mode['resolution_scale'])
             results = model(scaled, verbose=False, conf=config.AI_CONFIDENCE)
@@ -650,193 +1542,427 @@ class AIProcessor:
                 for box in boxes:
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     x1, y1, x2, y2 = int(x1/scale), int(y1/scale), int(x2/scale), int(y2/scale)
-                    confidence = float(box.conf[0])
-                    detected_needle = True
+                    raw_confidence = float(box.conf[0])
+                    raw_detected = True
 
-                    # Ponta da agulha (assumir canto inferior direito para agulha tipica)
-                    needle_tip = (x2, y2)
-                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                    self.needle_history.append((cx, cy, x1, y1, x2, y2))
+                    # Determinar ponta (ponto mais profundo)
+                    raw_tip_x, raw_tip_y = (x2, y2) if y2 > y1 else (x1, y1)
+                    raw_line = (x1, y1, x2, y2)
+
+                    # Calcular ângulo
+                    dx, dy = x2 - x1, y2 - y1
+                    if dx != 0 or dy != 0:
+                        raw_angle = np.arctan2(dy, dx) * 180 / np.pi
         else:
-            # Fallback CV: deteccao de linhas
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-            lines = cv2.HoughLinesP(edges, 1, np.pi/180, 50, minLineLength=60, maxLineGap=10)
+            # ═══════════════════════════════════════════════════════════════════════
+            # Fallback CV com RANSAC (FASE 2) - Detecção robusta
+            # ═══════════════════════════════════════════════════════════════════════
+            ransac_result = self._detect_needle_enhanced(frame)
 
-            if lines is not None:
-                # Encontrar linha mais provavel (angulo diagonal)
-                best_line = None
-                best_score = 0
-                for line in lines:
-                    x1, y1, x2, y2 = line[0]
-                    angle = abs(np.arctan2(y2-y1, x2-x1) * 180 / np.pi)
-                    length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
-                    if 15 < angle < 75 or 105 < angle < 165:
-                        score = length * (1 - abs(angle - 45) / 45)
-                        if score > best_score:
-                            best_score = score
-                            best_line = line[0]
+            if ransac_result is not None:
+                x1, y1, x2, y2, inliers, ransac_conf = ransac_result
+                raw_detected = True
+                raw_confidence = ransac_conf
+                raw_tip_x, raw_tip_y = (x2, y2) if y2 > y1 else (x1, y1)
+                raw_line = (x1, y1, x2, y2)
+                dx, dy = x2 - x1, y2 - y1
+                raw_angle = np.arctan2(dy, dx) * 180 / np.pi
+                logger.debug(f"RANSAC: {inliers} inliers, conf={ransac_conf:.2f}")
 
-                if best_line is not None:
-                    x1, y1, x2, y2 = best_line
-                    detected_needle = True
-                    confidence = min(0.9, best_score / 200)
-                    needle_tip = (x2, y2) if y2 > y1 else (x1, y1)
-                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                    self.needle_history.append((cx, cy, x1, y1, x2, y2))
+        # ═══════════════════════════════════════════════════════════════════════
+        # ETAPA 1.5: REFINAMENTO VASST/CV (FASE 4)
+        # ═══════════════════════════════════════════════════════════════════════
+        if raw_detected and self.use_vasst_refinement:
+            refined_x, refined_y, refine_conf = self._refine_needle_position(
+                frame, (raw_tip_x, raw_tip_y), raw_line
+            )
+            # Usar posição refinada se confiança for boa
+            if refine_conf > 0.3:
+                raw_tip_x, raw_tip_y = refined_x, refined_y
+                # Ponderar confiança original com refinamento
+                raw_confidence = raw_confidence * 0.7 + refine_conf * 0.3
+                logger.debug(f"VASST/CV refined: ({refined_x}, {refined_y}), conf={refine_conf:.2f}")
 
-        # Processar historico e calcular metricas
-        if len(self.needle_history) >= 2:
-            points = list(self.needle_history)
+        # ═══════════════════════════════════════════════════════════════════════
+        # ETAPA 2: KALMAN FILTER (Suavização e Predição)
+        # ═══════════════════════════════════════════════════════════════════════
+        smooth_x, smooth_y, smooth_angle, kalman_conf = self._update_needle_kalman(
+            raw_detected, raw_tip_x, raw_tip_y, raw_angle
+        )
 
-            # Extrair linha da agulha do ultimo ponto
-            if len(points[-1]) >= 6:
-                _, _, x1, y1, x2, y2 = points[-1]
+        # Determinar se temos tracking válido (detecção OU predição)
+        has_tracking = smooth_x is not None
 
+        # Variáveis finais para visualização
+        needle_tip = None
+        needle_angle = None
+        needle_depth = None
+        final_confidence = 0
+
+        if has_tracking:
+            needle_tip = (int(smooth_x), int(smooth_y))
+            needle_angle = smooth_angle
+            # FASE 3: Usar calibração real em vez de valor fixo
+            needle_depth = self._pixel_to_mm(int(smooth_y))
+            final_confidence = kalman_conf * (raw_confidence if raw_detected else 0.7)
+
+            # Guardar no histórico com confiança
+            if raw_line:
+                x1, y1, x2, y2 = raw_line
+            else:
+                # Usar predição para reconstruir linha
+                x1 = int(smooth_x - 50 * np.cos(np.radians(smooth_angle)))
+                y1 = int(smooth_y - 50 * np.sin(np.radians(smooth_angle)))
+                x2, y2 = int(smooth_x), int(smooth_y)
+
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            self.needle_history.append((cx, cy, x1, y1, x2, y2, kalman_conf))
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # ETAPA 3: VISUALIZAÇÃO PREMIUM
+        # ═══════════════════════════════════════════════════════════════════════
+
+        if len(self.needle_history) >= 1:
+            # Pegar último ponto do histórico
+            last_point = self.needle_history[-1]
+            if len(last_point) >= 6:
+                if len(last_point) >= 7:
+                    _, _, x1, y1, x2, y2, point_conf = last_point
+                else:
+                    _, _, x1, y1, x2, y2 = last_point
+                    point_conf = 1.0
+
+                # ═══════════════════════════════════════════════════════════
+                # Cor baseada no modo de tracking
+                # ═══════════════════════════════════════════════════════════
+                if self.needle_tracking_mode == 'tracking':
+                    # Verde sólido - detecção confirmada
+                    line_color_outer = (0, 80, 0)
+                    line_color_mid = (0, 200, 0)
+                    line_color_inner = (0, 255, 0)
+                    tip_color = (0, 255, 0)
+                elif self.needle_tracking_mode == 'predicting':
+                    # Amarelo/Laranja - predição (sem detecção atual)
+                    line_color_outer = (0, 80, 100)
+                    line_color_mid = (0, 180, 220)
+                    line_color_inner = (0, 200, 255)
+                    tip_color = (0, 200, 255)
+                else:
+                    # Cinza - searching
+                    line_color_outer = (40, 40, 40)
+                    line_color_mid = (80, 80, 80)
+                    line_color_inner = (120, 120, 120)
+                    tip_color = (100, 100, 100)
+
+                # ═══════════════════════════════════════════════════════════
                 # Desenhar linha da agulha com glow
-                cv2.line(output, (x1, y1), (x2, y2), (0, 80, 0), 5)
-                cv2.line(output, (x1, y1), (x2, y2), (0, 200, 0), 3)
-                cv2.line(output, (x1, y1), (x2, y2), (0, 255, 0), 1)
+                # ═══════════════════════════════════════════════════════════
+                cv2.line(output, (x1, y1), (x2, y2), line_color_outer, 7)
+                cv2.line(output, (x1, y1), (x2, y2), line_color_mid, 4)
+                cv2.line(output, (x1, y1), (x2, y2), line_color_inner, 2)
 
-                # Calcular angulo
-                dx = x2 - x1
-                dy = y2 - y1
-                if dx != 0:
-                    needle_angle = np.arctan2(dy, dx) * 180 / np.pi
-
-                # Estimar profundidade (assumir 0.3mm/pixel)
-                if needle_tip:
-                    needle_depth = needle_tip[1] * 0.3  # mm
-
+                # ═══════════════════════════════════════════════════════════
                 # Ponta da agulha destacada
+                # ═══════════════════════════════════════════════════════════
                 if needle_tip:
-                    cv2.circle(output, needle_tip, 8, (0, 100, 0), 2)
-                    cv2.circle(output, needle_tip, 5, (0, 255, 0), -1)
-                    cv2.circle(output, needle_tip, 3, (255, 255, 255), -1)
+                    # ═══════════════════════════════════════════════════════
+                    # FASE 5: Elipse de Incerteza (baseada na covariância do Kalman)
+                    # ═══════════════════════════════════════════════════════
+                    if self.kalman_initialized and self.needle_tracking_mode in ['tracking', 'predicting']:
+                        try:
+                            # Extrair covariância da posição (2x2 superior esquerdo)
+                            P = self.needle_kalman.P
+                            cov_xy = np.array([[P[0, 0], P[0, 1]], [P[1, 0], P[1, 1]]])
 
-                # Projecao de trajetoria
+                            # Calcular autovalores e autovetores para elipse
+                            eigenvalues, eigenvectors = np.linalg.eig(cov_xy)
+
+                            # Eixos da elipse (2-sigma = ~95% confiança)
+                            scale_factor = 2.0 if self.needle_tracking_mode == 'tracking' else 3.0
+                            width = int(scale_factor * np.sqrt(max(0.1, abs(eigenvalues[0]))))
+                            height = int(scale_factor * np.sqrt(max(0.1, abs(eigenvalues[1]))))
+
+                            # Ângulo da elipse
+                            angle = np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]) * 180 / np.pi
+
+                            # Limitar tamanho para não ficar absurdo
+                            width = min(40, max(5, width))
+                            height = min(40, max(5, height))
+
+                            # Cor da elipse baseada no modo
+                            if self.needle_tracking_mode == 'tracking':
+                                ellipse_color = (0, 150, 0)  # Verde suave
+                            else:
+                                ellipse_color = (0, 130, 180)  # Laranja suave
+
+                            # Desenhar elipse de incerteza (atrás da ponta)
+                            cv2.ellipse(output, needle_tip, (width, height),
+                                       angle, 0, 360, ellipse_color, 1, cv2.LINE_AA)
+                        except Exception:
+                            pass  # Ignorar erros de cálculo matricial
+
+                    # Glow externo
+                    cv2.circle(output, needle_tip, 12, line_color_outer, 2)
+                    # Círculo médio
+                    cv2.circle(output, needle_tip, 8, line_color_mid, 2)
+                    # Círculo interno preenchido
+                    cv2.circle(output, needle_tip, 5, tip_color, -1)
+                    # Centro branco
+                    cv2.circle(output, needle_tip, 2, (255, 255, 255), -1)
+
+                # ═══════════════════════════════════════════════════════════
+                # Projeção de trajetória
+                # ═══════════════════════════════════════════════════════════
+                dx, dy = x2 - x1, y2 - y1
                 if abs(dx) > 5 or abs(dy) > 5:
-                    proj_len = 100
+                    proj_len = 120
                     norm = np.sqrt(dx**2 + dy**2)
-                    ux, uy = dx/norm, dy/norm
+                    if norm > 0:
+                        ux, uy = dx/norm, dy/norm
 
-                    # Linha de projecao tracejada
-                    for i in range(0, proj_len, 8):
-                        t1, t2 = i/proj_len, (i+4)/proj_len
-                        p1 = (int(x2 + ux * proj_len * t1), int(y2 + uy * proj_len * t1))
-                        p2 = (int(x2 + ux * proj_len * t2), int(y2 + uy * proj_len * t2))
-                        alpha = 1 - i/proj_len
-                        color = (0, int(200*alpha), int(255*alpha))
-                        cv2.line(output, p1, p2, color, 2)
+                        # Linha de projeção tracejada com fade
+                        for i in range(0, proj_len, 10):
+                            t1, t2 = i/proj_len, (i+5)/proj_len
+                            p1 = (int(x2 + ux * proj_len * t1), int(y2 + uy * proj_len * t1))
+                            p2 = (int(x2 + ux * proj_len * t2), int(y2 + uy * proj_len * t2))
+                            alpha = 1 - i/proj_len
+                            color = (0, int(180*alpha), int(255*alpha))
+                            cv2.line(output, p1, p2, color, 2)
 
-                    # Ponto alvo
-                    target = (int(x2 + ux * proj_len), int(y2 + uy * proj_len))
-                    cv2.circle(output, target, 12, (0, 150, 255), 2)
-                    cv2.circle(output, target, 6, (0, 200, 255), -1)
-                    cv2.line(output, (target[0]-8, target[1]), (target[0]+8, target[1]), (255, 255, 255), 1)
-                    cv2.line(output, (target[0], target[1]-8), (target[0], target[1]+8), (255, 255, 255), 1)
+                        # Ponto alvo com crosshair
+                        target = (int(x2 + ux * proj_len), int(y2 + uy * proj_len))
+                        cv2.circle(output, target, 15, (0, 120, 200), 2)
+                        cv2.circle(output, target, 8, (0, 180, 255), -1)
+                        cv2.circle(output, target, 4, (255, 255, 255), -1)
+                        # Crosshair
+                        cv2.line(output, (target[0]-12, target[1]), (target[0]+12, target[1]), (255, 255, 255), 1)
+                        cv2.line(output, (target[0], target[1]-12), (target[0], target[1]+12), (255, 255, 255), 1)
 
-            # Trajetoria historica (trail)
-            for i in range(1, min(len(points), 10)):
-                alpha = i / 10
-                p1 = (points[-i-1][0], points[-i-1][1])
-                p2 = (points[-i][0], points[-i][1])
-                color = (0, int(100 + 50*alpha), int(150 + 50*alpha))
-                cv2.line(output, p1, p2, color, 1)
+            # ═══════════════════════════════════════════════════════════════
+            # Trail histórico com cores por confiança
+            # ═══════════════════════════════════════════════════════════════
+            points = list(self.needle_history)
+            for i in range(1, min(len(points), 12)):
+                if len(points[-i]) >= 2 and len(points[-i-1]) >= 2:
+                    p1 = (points[-i-1][0], points[-i-1][1])
+                    p2 = (points[-i][0], points[-i][1])
 
-        # ═══════════════════════════════════════
-        # PAINEL LATERAL DIREITO (estilo Clarius)
-        # ═══════════════════════════════════════
-        panel_w = 160
+                    # Confiança do ponto (se disponível)
+                    if len(points[-i]) >= 7:
+                        pt_conf = points[-i][6]
+                    else:
+                        pt_conf = 1.0
+
+                    # Cor baseada em confiança e idade
+                    age_factor = 1 - (i / 12)
+                    if pt_conf > 0.7:
+                        color = (0, int(100 + 100*age_factor), int(150 + 100*age_factor))
+                    else:
+                        color = (0, int(100*age_factor), int(180*age_factor + 75))
+
+                    thickness = max(1, int(2 * age_factor))
+                    cv2.line(output, p1, p2, color, thickness)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # ETAPA 4: PAINEL LATERAL PREMIUM
+        # ═══════════════════════════════════════════════════════════════════════
+        panel_w = 170
         panel_x = w - panel_w - 10
         panel_y = 10
-        panel_h = 180
+        panel_h = 250  # Aumentado para caber calibração (FASE 5)
 
-        # Background do painel
+        # Background do painel com gradiente
         overlay = output.copy()
         cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
-                     (20, 30, 20), -1)
-        cv2.addWeighted(overlay, 0.85, output, 0.15, 0, output)
-        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
-                     (0, 200, 0), 1)
+                     (15, 25, 15), -1)
+        cv2.addWeighted(overlay, 0.88, output, 0.12, 0, output)
 
-        # Titulo
-        cv2.putText(output, "NEEDLE PILOT", (panel_x + 10, panel_y + 22),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
-
-        # Status
-        status_y = panel_y + 45
-        if detected_needle:
-            cv2.circle(output, (panel_x + 15, status_y), 5, (0, 255, 0), -1)
-            cv2.putText(output, "TRACKING", (panel_x + 25, status_y + 4),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.35, (0, 255, 0), 1, cv2.LINE_AA)
+        # Borda do painel baseada no modo
+        if self.needle_tracking_mode == 'tracking':
+            border_color = (0, 220, 0)
+        elif self.needle_tracking_mode == 'predicting':
+            border_color = (0, 180, 255)
         else:
-            cv2.circle(output, (panel_x + 15, status_y), 5, (80, 80, 80), -1)
-            cv2.putText(output, "SEARCHING", (panel_x + 25, status_y + 4),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.35, (100, 100, 100), 1, cv2.LINE_AA)
+            border_color = (80, 80, 80)
+        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                     border_color, 2)
 
-        # Confianca
-        conf_y = panel_y + 70
-        cv2.putText(output, "CONF", (panel_x + 10, conf_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 120, 100), 1, cv2.LINE_AA)
-        bar_w = panel_w - 60
-        cv2.rectangle(output, (panel_x + 50, conf_y - 8), (panel_x + 50 + bar_w, conf_y + 2), (40, 50, 40), -1)
-        fill_w = int(bar_w * confidence)
-        conf_color = (0, 255, 0) if confidence > 0.7 else (0, 200, 200) if confidence > 0.4 else (0, 100, 200)
-        cv2.rectangle(output, (panel_x + 50, conf_y - 8), (panel_x + 50 + fill_w, conf_y + 2), conf_color, -1)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Título com ícone de status
+        # ═══════════════════════════════════════════════════════════════════════
+        cv2.putText(output, "NEEDLE PILOT", (panel_x + 12, panel_y + 22),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
 
-        # Angulo
-        angle_y = panel_y + 100
+        # Versão/modo pequeno (FASE 5 PREMIUM + VASST)
+        cv2.putText(output, "v3.1", (panel_x + 110, panel_y + 22),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.25, (0, 200, 150), 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # Status do Tracking (TRACKING / PREDICTING / SEARCHING)
+        # ═══════════════════════════════════════════════════════════════════════
+        status_y = panel_y + 48
+
+        if self.needle_tracking_mode == 'tracking':
+            # LED verde pulsante
+            cv2.circle(output, (panel_x + 15, status_y), 6, (0, 255, 0), -1)
+            cv2.circle(output, (panel_x + 15, status_y), 8, (0, 200, 0), 1)
+            cv2.putText(output, "TRACKING", (panel_x + 28, status_y + 5),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.4, (0, 255, 0), 1, cv2.LINE_AA)
+        elif self.needle_tracking_mode == 'predicting':
+            # LED amarelo/laranja
+            cv2.circle(output, (panel_x + 15, status_y), 6, (0, 200, 255), -1)
+            cv2.circle(output, (panel_x + 15, status_y), 8, (0, 150, 200), 1)
+            cv2.putText(output, "PREDICTING", (panel_x + 28, status_y + 5),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.4, (0, 200, 255), 1, cv2.LINE_AA)
+            # Mostrar frames restantes
+            frames_left = self.max_prediction_frames - self.frames_without_detection
+            cv2.putText(output, f"({frames_left})", (panel_x + 125, status_y + 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 150, 200), 1, cv2.LINE_AA)
+        else:
+            # LED cinza
+            cv2.circle(output, (panel_x + 15, status_y), 6, (80, 80, 80), -1)
+            cv2.circle(output, (panel_x + 15, status_y), 8, (60, 60, 60), 1)
+            cv2.putText(output, "SEARCHING", (panel_x + 28, status_y + 5),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.4, (120, 120, 120), 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # Barra de Confiança (Detection)
+        # ═══════════════════════════════════════════════════════════════════════
+        conf_y = panel_y + 75
+        cv2.putText(output, "DETECT", (panel_x + 10, conf_y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (100, 130, 100), 1, cv2.LINE_AA)
+        bar_w = panel_w - 70
+        bar_x = panel_x + 55
+        cv2.rectangle(output, (bar_x, conf_y - 8), (bar_x + bar_w, conf_y + 3), (30, 40, 30), -1)
+        fill_w = int(bar_w * raw_confidence)
+        conf_color = (0, 255, 0) if raw_confidence > 0.7 else (0, 200, 200) if raw_confidence > 0.4 else (0, 100, 180)
+        cv2.rectangle(output, (bar_x, conf_y - 8), (bar_x + fill_w, conf_y + 3), conf_color, -1)
+        cv2.putText(output, f"{raw_confidence*100:.0f}%", (bar_x + bar_w + 5, conf_y),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.28, conf_color, 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # Barra de Confiança do Kalman (Track)
+        # ═══════════════════════════════════════════════════════════════════════
+        kalman_y = panel_y + 98
+        cv2.putText(output, "TRACK", (panel_x + 10, kalman_y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (100, 130, 100), 1, cv2.LINE_AA)
+        cv2.rectangle(output, (bar_x, kalman_y - 8), (bar_x + bar_w, kalman_y + 3), (30, 40, 30), -1)
+        kalman_fill = int(bar_w * self.kalman_confidence)
+        kalman_color = (0, 255, 200) if self.kalman_confidence > 0.7 else (0, 200, 255) if self.kalman_confidence > 0.3 else (80, 80, 80)
+        cv2.rectangle(output, (bar_x, kalman_y - 8), (bar_x + kalman_fill, kalman_y + 3), kalman_color, -1)
+        cv2.putText(output, f"{self.kalman_confidence*100:.0f}%", (bar_x + bar_w + 5, kalman_y),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.28, kalman_color, 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # Ângulo
+        # ═══════════════════════════════════════════════════════════════════════
+        angle_y = panel_y + 128
         cv2.putText(output, "ANGLE", (panel_x + 10, angle_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 120, 100), 1, cv2.LINE_AA)
+                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 130, 100), 1, cv2.LINE_AA)
         if needle_angle is not None:
             angle_text = f"{abs(needle_angle):.1f}"
-            cv2.putText(output, angle_text, (panel_x + 55, angle_y),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
-            cv2.putText(output, "deg", (panel_x + 110, angle_y),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 150, 150), 1, cv2.LINE_AA)
+            cv2.putText(output, angle_text, (panel_x + 60, angle_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(output, "deg", (panel_x + 115, angle_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 150, 150), 1, cv2.LINE_AA)
         else:
-            cv2.putText(output, "---", (panel_x + 70, angle_y),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (80, 80, 80), 1, cv2.LINE_AA)
+            cv2.putText(output, "---", (panel_x + 75, angle_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (60, 60, 60), 1, cv2.LINE_AA)
 
+        # ═══════════════════════════════════════════════════════════════════════
         # Profundidade
-        depth_y = panel_y + 130
+        # ═══════════════════════════════════════════════════════════════════════
+        depth_y = panel_y + 158
         cv2.putText(output, "DEPTH", (panel_x + 10, depth_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 120, 100), 1, cv2.LINE_AA)
+                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 130, 100), 1, cv2.LINE_AA)
         if needle_depth is not None:
             depth_text = f"{needle_depth:.1f}"
-            cv2.putText(output, depth_text, (panel_x + 55, depth_y),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 255, 200), 1, cv2.LINE_AA)
-            cv2.putText(output, "mm", (panel_x + 110, depth_y),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 150, 150), 1, cv2.LINE_AA)
+            cv2.putText(output, depth_text, (panel_x + 60, depth_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.55, (0, 255, 200), 1, cv2.LINE_AA)
+            cv2.putText(output, "mm", (panel_x + 115, depth_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 150, 150), 1, cv2.LINE_AA)
         else:
-            cv2.putText(output, "---", (panel_x + 70, depth_y),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (80, 80, 80), 1, cv2.LINE_AA)
+            cv2.putText(output, "---", (panel_x + 75, depth_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (60, 60, 60), 1, cv2.LINE_AA)
 
-        # Dica de correcao
-        tip_y = panel_y + 160
-        if detected_needle and needle_angle is not None:
-            if abs(needle_angle) < 30:
-                tip = "STEEPEN"
-                tip_color = (0, 200, 255)
-            elif abs(needle_angle) > 60:
-                tip = "FLATTEN"
-                tip_color = (0, 200, 255)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Dica de correção
+        # ═══════════════════════════════════════════════════════════════════════
+        tip_y = panel_y + 195
+        if has_tracking and needle_angle is not None:
+            abs_angle = abs(needle_angle)
+            if abs_angle < 25:
+                tip_text = "↗ STEEPEN"
+                tip_color = (0, 180, 255)
+            elif abs_angle > 65:
+                tip_text = "↘ FLATTEN"
+                tip_color = (0, 180, 255)
             else:
-                tip = "ON TARGET"
+                tip_text = "✓ ON TARGET"
                 tip_color = (0, 255, 0)
-            cv2.putText(output, tip, (panel_x + 10, tip_y),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.4, tip_color, 1, cv2.LINE_AA)
+            cv2.putText(output, tip_text, (panel_x + 12, tip_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.42, tip_color, 1, cv2.LINE_AA)
 
-        # Escala de profundidade na lateral esquerda
-        scale_x = 25
-        for i in range(0, h, 50):
-            depth_mm = i * 0.3
-            cv2.line(output, (scale_x - 5, i), (scale_x + 5, i), (0, 150, 0), 1)
-            if i % 100 == 0:
-                cv2.putText(output, f"{int(depth_mm)}", (scale_x + 8, i + 4),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 150, 0), 1, cv2.LINE_AA)
-        cv2.line(output, (scale_x, 0), (scale_x, h), (0, 100, 0), 1)
+        # ═══════════════════════════════════════════════════════════════════════
+        # FASE 5: Info de Calibração e Atalhos
+        # ═══════════════════════════════════════════════════════════════════════
+        cal_y = panel_y + 225
+        total_depth = self.calibration['depth_mm']
+        mm_px = self.calibration['mm_per_pixel']
+
+        # Linha de calibração
+        cv2.putText(output, f"Scale: {mm_px:.3f}mm/px", (panel_x + 10, cal_y),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.22, (80, 100, 80), 1, cv2.LINE_AA)
+
+        # Atalhos
+        cal_y2 = panel_y + 242
+        cv2.putText(output, "[", (panel_x + 10, cal_y2),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.25, (100, 130, 100), 1, cv2.LINE_AA)
+        cv2.putText(output, f"-10mm", (panel_x + 20, cal_y2),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.2, (80, 100, 80), 1, cv2.LINE_AA)
+        cv2.putText(output, "]", (panel_x + 70, cal_y2),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.25, (100, 130, 100), 1, cv2.LINE_AA)
+        cv2.putText(output, f"+10mm", (panel_x + 80, cal_y2),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.2, (80, 100, 80), 1, cv2.LINE_AA)
+        cv2.putText(output, f"[{int(total_depth)}mm]", (panel_x + 125, cal_y2),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.22, (0, 180, 0), 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # ESCALA DE PROFUNDIDADE (lateral esquerda)
+        # ═══════════════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════════════════
+        # ESCALA LATERAL CALIBRADA (FASE 3)
+        # ═══════════════════════════════════════════════════════════════════════
+        scale_x = 30
+        mm_per_pixel = self.calibration['mm_per_pixel']
+
+        # Linha principal da escala
+        cv2.line(output, (scale_x, 10), (scale_x, h - 10), (0, 120, 0), 1)
+
+        # Calcular step baseado na profundidade total para ter ~8-10 marcações
+        total_depth = self.calibration['depth_mm']
+        step_mm = 10 if total_depth <= 100 else 20  # 10mm steps para < 100mm, 20mm para maiores
+
+        step_pixels = int(step_mm / mm_per_pixel) if mm_per_pixel > 0 else 50
+        step_pixels = max(20, step_pixels)  # Mínimo 20 pixels entre marcações
+
+        for i in range(0, h, step_pixels):
+            depth_mm = self._pixel_to_mm(i)
+            # Marcação maior a cada 2x step
+            if int(depth_mm) % (step_mm * 2) == 0:
+                cv2.line(output, (scale_x - 8, i), (scale_x + 3, i), (0, 180, 0), 1)
+                cv2.putText(output, f"{int(depth_mm)}", (scale_x + 6, i + 4),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.32, (0, 180, 0), 1, cv2.LINE_AA)
+            else:
+                cv2.line(output, (scale_x - 4, i), (scale_x + 2, i), (0, 100, 0), 1)
+
+        # Label "mm" no topo + indicador de calibração
+        cv2.putText(output, "mm", (scale_x - 8, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.28, (0, 150, 0), 1, cv2.LINE_AA)
+
+        # Mostrar profundidade total configurada no canto
+        cv2.putText(output, f"[{int(total_depth)}mm]", (scale_x - 12, h - 15),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.25, (0, 120, 0), 1, cv2.LINE_AA)
 
         return output
 
@@ -860,145 +1986,161 @@ class AIProcessor:
         return output
 
     def _process_nerve(self, frame):
-        """Nerve Track - Sistema avancado de segmentacao neurovascular estilo Clarius."""
-        model = self.models.get('nerve')
+        """
+        NERVE TRACK v2.0 PREMIUM
+        ========================
+        Sistema avançado de detecção e tracking de nervos para ultrassom.
+
+        Características:
+        - U-Net++ com EfficientNet-B4 + CBAM + ConvLSTM
+        - Kalman Filter para tracking temporal (anti-flicker)
+        - Classificação automática Nervo/Artéria/Veia
+        - Identificação contextual por tipo de bloqueio (28 tipos)
+        - Medição automática de CSA (Cross-Sectional Area)
+        - Visual premium com alertas de zonas de perigo
+        """
         output = frame.copy()
         h, w = frame.shape[:2]
 
-        structures = []  # Lista de estruturas detectadas
+        # ═══════════════════════════════════════════════════════════════════════
+        # USAR NERVE TRACK v2.0 SE DISPONÍVEL
+        # ═══════════════════════════════════════════════════════════════════════
+        if self.nerve_track_available and self.nerve_track_system is not None:
+            try:
+                # Processar frame com sistema completo
+                result = self.nerve_track_system.process_frame(frame)
 
-        if model:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            resized = cv2.resize(gray, (224, 224))
-            tensor = torch.from_numpy(resized).float() / 255.0
-            tensor = tensor.unsqueeze(0).unsqueeze(0).to(self.device)
+                # Se temos visualização renderizada, usar ela
+                if result.get('visualization') is not None:
+                    return result['visualization']
 
-            with torch.no_grad():
-                masks = model(tensor).cpu().numpy()[0]
+                # Caso contrário, renderizar manualmente as estruturas identificadas
+                identified = result.get('identified', [])
+                tracks = result.get('tracks', [])
 
-            # Classes: Nervo, Arteria, Veia
-            class_config = [
-                ("NERVE", (0, 255, 255), (0, 180, 180)),    # Amarelo
-                ("ARTERY", (0, 0, 255), (0, 0, 180)),       # Vermelho
-                ("VEIN", (255, 100, 100), (180, 70, 70)),   # Azul
-            ]
-
-            for i in range(min(3, masks.shape[0])):
-                mask = cv2.resize(masks[i], (w, h))
-                binary = (mask > 0.5).astype(np.uint8)
-
-                if binary.any():
-                    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                    for cnt in contours:
-                        area = cv2.contourArea(cnt)
-                        if area > 200:
-                            name, color_bright, color_dark = class_config[i]
-
-                            # Preenchimento semi-transparente
-                            overlay = output.copy()
-                            cv2.drawContours(overlay, [cnt], -1, color_dark, -1)
-                            cv2.addWeighted(overlay, 0.3, output, 0.7, 0, output)
-
-                            # Contorno com glow
-                            cv2.drawContours(output, [cnt], -1, color_dark, 3)
-                            cv2.drawContours(output, [cnt], -1, color_bright, 1)
-
-                            # Centro e metricas
-                            M = cv2.moments(cnt)
-                            if M["m00"] > 0:
-                                cx = int(M["m10"] / M["m00"])
-                                cy = int(M["m01"] / M["m00"])
-
-                                # Calcular diametro (circulo equivalente)
-                                diameter_px = np.sqrt(4 * area / np.pi)
-                                diameter_mm = diameter_px * 0.3  # ~0.3mm/pixel
-
-                                structures.append({
-                                    'type': name,
-                                    'center': (cx, cy),
-                                    'area': area,
-                                    'diameter': diameter_mm,
-                                    'color': color_bright,
-                                    'contour': cnt
-                                })
-        else:
-            # Fallback: Deteccao por CV (circulos)
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
-
-            circles = cv2.HoughCircles(
-                enhanced, cv2.HOUGH_GRADIENT, 1, 30,
-                param1=50, param2=30, minRadius=8, maxRadius=100
-            )
-
-            if circles is not None:
-                circles = np.uint16(np.around(circles))
-                for x, y, r in circles[0, :6]:
-                    area = np.pi * r * r
-                    diameter_mm = r * 2 * 0.3
-
-                    # Classificar por tamanho e ecogenicidade
-                    roi = gray[max(0,y-r):y+r, max(0,x-r):x+r]
-                    if roi.size > 0:
-                        mean_intensity = np.mean(roi)
-
-                        if r > 30:
-                            name, color = "NERVE", (0, 255, 255)
-                        elif mean_intensity < 60:
-                            name, color = "ARTERY", (0, 0, 255)
+                # Renderizar estruturas identificadas
+                for struct in identified:
+                    if struct.contour is not None and len(struct.contour) > 0:
+                        # Cor baseada no tipo
+                        if struct.is_target:
+                            color = (0, 255, 0)  # Verde para alvo
+                        elif struct.is_danger_zone:
+                            color = (0, 0, 255)  # Vermelho para perigo
+                        elif struct.structure_type.value == 'nerve':
+                            color = (0, 255, 255)  # Amarelo para nervo
+                        elif struct.structure_type.value == 'artery':
+                            color = (0, 0, 255)  # Vermelho para artéria
+                        elif struct.structure_type.value == 'vein':
+                            color = (255, 0, 0)  # Azul para veia
                         else:
-                            name, color = "VEIN", (255, 100, 100)
+                            color = (128, 128, 128)  # Cinza para outros
 
-                        # Desenhar com glow
-                        cv2.circle(output, (x, y), r+2, (color[0]//2, color[1]//2, color[2]//2), 2)
-                        cv2.circle(output, (x, y), r, color, 1)
+                        # Overlay
+                        overlay = output.copy()
+                        cv2.drawContours(overlay, [struct.contour], -1, color, -1)
+                        cv2.addWeighted(overlay, 0.3, output, 0.7, 0, output)
 
-                        structures.append({
-                            'type': name,
-                            'center': (int(x), int(y)),
-                            'area': area,
-                            'diameter': diameter_mm,
-                            'color': color,
-                            'contour': None
-                        })
+                        # Contorno
+                        thickness = 3 if struct.is_target else 2
+                        cv2.drawContours(output, [struct.contour], -1, color, thickness)
 
-        # ═══════════════════════════════════════
-        # LABELS E MEDICOES
-        # ═══════════════════════════════════════
-        for s in structures:
-            cx, cy = s['center']
-            # Label com background
-            label = f"{s['type']}"
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.4, 1)
-            cv2.rectangle(output, (cx - tw//2 - 3, cy - th - 5), (cx + tw//2 + 3, cy + 2), (20, 20, 30), -1)
-            cv2.putText(output, label, (cx - tw//2, cy - 2), cv2.FONT_HERSHEY_DUPLEX, 0.4, s['color'], 1, cv2.LINE_AA)
+                        # Label
+                        cx, cy = int(struct.centroid[0]), int(struct.centroid[1])
+                        label = f"{struct.abbreviation}"
+                        if struct.area_mm2:
+                            label += f" {struct.area_mm2:.1f}mm²"
 
-            # Diameter abaixo
-            diam_label = f"{s['diameter']:.1f}mm"
-            cv2.putText(output, diam_label, (cx - 15, cy + 18), cv2.FONT_HERSHEY_DUPLEX, 0.35, (180, 180, 200), 1, cv2.LINE_AA)
+                        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.4, 1)
+                        cv2.rectangle(output, (cx - tw//2 - 3, cy - th - 8),
+                                     (cx + tw//2 + 3, cy - 2), (0, 0, 0), -1)
+                        cv2.putText(output, label, (cx - tw//2, cy - 5),
+                                   cv2.FONT_HERSHEY_DUPLEX, 0.4, color, 1, cv2.LINE_AA)
 
-        # Desenhar linhas de distancia entre estruturas proximas
-        if len(structures) >= 2:
-            for i, s1 in enumerate(structures):
-                for s2 in structures[i+1:]:
-                    d = np.sqrt((s1['center'][0]-s2['center'][0])**2 + (s1['center'][1]-s2['center'][1])**2)
-                    if d < 150:  # Estruturas proximas
-                        dist_mm = d * 0.3
-                        mid = ((s1['center'][0]+s2['center'][0])//2, (s1['center'][1]+s2['center'][1])//2)
-                        cv2.line(output, s1['center'], s2['center'], (100, 100, 120), 1)
-                        cv2.putText(output, f"{dist_mm:.1f}mm", (mid[0]-15, mid[1]-5),
-                                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (150, 150, 180), 1, cv2.LINE_AA)
+                # Painel de informações
+                output = self._draw_nerve_track_panel(output, identified, w, h)
 
-        # ═══════════════════════════════════════
-        # PAINEL LATERAL (estilo Clarius)
-        # ═══════════════════════════════════════
-        panel_w = 160
+            except Exception as e:
+                logger.warning(f"Erro no NERVE TRACK v2.0: {e}")
+                # Fallback para detecção básica
+                output = self._process_nerve_fallback(frame)
+        else:
+            # Fallback se NERVE TRACK não disponível
+            output = self._process_nerve_fallback(frame)
+
+        return output
+
+    def _process_nerve_fallback(self, frame):
+        """Fallback: Detecção básica de nervos por CV quando NERVE TRACK v2.0 não disponível."""
+        output = frame.copy()
+        h, w = frame.shape[:2]
+        structures = []
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # ATLAS EDUCACIONAL - Usar quando modelo não está treinado
+        # ═══════════════════════════════════════════════════════════════════════
+        if self.educational_atlas is not None:
+            # Atualizar bloco no atlas se definido
+            if self.nerve_block_id:
+                self.educational_atlas.set_block(self.nerve_block_id)
+
+            # Atualizar animação
+            self.educational_atlas.update_animation()
+
+            # Renderizar atlas educacional
+            output = self.educational_atlas.render_atlas(output, self.atlas_mode)
+            return output
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # Deteccao por CV (circulos) - Fallback básico
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        circles = cv2.HoughCircles(
+            enhanced, cv2.HOUGH_GRADIENT, 1, 30,
+            param1=50, param2=30, minRadius=8, maxRadius=100
+        )
+
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            for x, y, r in circles[0, :6]:
+                area = np.pi * r * r
+                diameter_mm = r * 2 * self.calibration.get('mm_per_pixel', 0.3)
+
+                # Classificar por tamanho e ecogenicidade
+                roi = gray[max(0,y-r):y+r, max(0,x-r):x+r]
+                if roi.size > 0:
+                    mean_intensity = np.mean(roi)
+
+                    if r > 30:
+                        name, color = "NERVE", (0, 255, 255)
+                    elif mean_intensity < 60:
+                        name, color = "ARTERY", (0, 0, 255)
+                    else:
+                        name, color = "VEIN", (255, 100, 100)
+
+                    # Desenhar
+                    cv2.circle(output, (x, y), r+2, (color[0]//2, color[1]//2, color[2]//2), 2)
+                    cv2.circle(output, (x, y), r, color, 1)
+
+                    # Label
+                    cv2.putText(output, name, (x - 20, y - r - 5),
+                               cv2.FONT_HERSHEY_DUPLEX, 0.35, color, 1, cv2.LINE_AA)
+                    cv2.putText(output, f"{diameter_mm:.1f}mm", (x - 15, y + r + 15),
+                               cv2.FONT_HERSHEY_DUPLEX, 0.3, (150, 150, 180), 1, cv2.LINE_AA)
+
+                    structures.append({
+                        'type': name,
+                        'center': (int(x), int(y)),
+                        'diameter': diameter_mm,
+                        'color': color
+                    })
+
+        # Painel simples
+        panel_w = 140
         panel_x = w - panel_w - 10
         panel_y = 10
-        panel_h = 30 + len(structures) * 35 + 40
-        panel_h = min(panel_h, h - 20)
+        panel_h = 80
 
         overlay = output.copy()
         cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (30, 30, 20), -1)
@@ -1006,34 +2148,172 @@ class AIProcessor:
         cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (0, 200, 200), 1)
 
         cv2.putText(output, "NERVE TRACK", (panel_x + 10, panel_y + 22),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(output, "(Modo Basico)", (panel_x + 10, panel_y + 40),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (150, 150, 150), 1, cv2.LINE_AA)
 
-        # Lista de estruturas
-        y_off = panel_y + 45
-        for i, s in enumerate(structures[:5]):
-            cv2.circle(output, (panel_x + 15, y_off), 5, s['color'], -1)
-            cv2.putText(output, s['type'], (panel_x + 25, y_off + 4),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.35, s['color'], 1, cv2.LINE_AA)
-            cv2.putText(output, f"{s['diameter']:.1f}mm", (panel_x + 90, y_off + 4),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.35, (150, 150, 180), 1, cv2.LINE_AA)
-            y_off += 30
-
-        # Contagem total
         nerve_count = sum(1 for s in structures if s['type'] == 'NERVE')
         vessel_count = len(structures) - nerve_count
-        cv2.putText(output, f"N:{nerve_count} V:{vessel_count}", (panel_x + 10, panel_y + panel_h - 10),
+        cv2.putText(output, f"N:{nerve_count} V:{vessel_count}", (panel_x + 10, panel_y + 60),
                    cv2.FONT_HERSHEY_DUPLEX, 0.35, (120, 120, 140), 1, cv2.LINE_AA)
 
-        # Escala de profundidade lateral
-        scale_x = 20
-        for i in range(0, h, 50):
-            cv2.line(output, (scale_x - 3, i), (scale_x + 3, i), (0, 150, 150), 1)
-            if i % 100 == 0:
-                cv2.putText(output, f"{int(i*0.3)}", (scale_x + 5, i + 4),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.25, (0, 150, 150), 1)
-        cv2.line(output, (scale_x, 0), (scale_x, h), (0, 100, 100), 1)
+        return output
+
+    def _draw_nerve_track_panel(self, output, identified, w, h):
+        """Desenha painel de informações do NERVE TRACK v2.0."""
+        # Painel premium
+        panel_w = 180
+        panel_x = w - panel_w - 10
+        panel_y = 10
+
+        # Calcular altura baseado no conteúdo
+        base_height = 90
+        struct_height = min(len(identified), 5) * 28
+        panel_h = base_height + struct_height
+
+        # Background do painel
+        overlay = output.copy()
+        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (20, 25, 30), -1)
+        cv2.addWeighted(overlay, 0.9, output, 0.1, 0, output)
+
+        # Borda com gradiente
+        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (0, 200, 200), 1)
+        cv2.rectangle(output, (panel_x + 1, panel_y + 1), (panel_x + panel_w - 1, panel_y + 27), (0, 100, 100), -1)
+
+        # Título
+        cv2.putText(output, "NERVE TRACK v2.0", (panel_x + 8, panel_y + 20),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+
+        # Nome do bloqueio se selecionado
+        if self.nerve_block_id and self.nerve_track_system:
+            block_info = self.nerve_track_system.get_block_info()
+            if block_info:
+                block_name = block_info.name[:20]  # Truncar se muito longo
+                cv2.putText(output, block_name, (panel_x + 8, panel_y + 42),
+                           cv2.FONT_HERSHEY_DUPLEX, 0.32, (180, 180, 180), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(output, "Selecione bloqueio...", (panel_x + 8, panel_y + 42),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 100, 100), 1, cv2.LINE_AA)
+
+        # Linha separadora
+        cv2.line(output, (panel_x + 5, panel_y + 50), (panel_x + panel_w - 5, panel_y + 50), (60, 60, 60), 1)
+
+        # Lista de estruturas identificadas
+        y_off = panel_y + 65
+        for i, struct in enumerate(identified[:5]):
+            # Cor baseada no tipo
+            if struct.is_target:
+                color = (0, 255, 0)
+                prefix = "[ALVO]"
+            elif struct.is_danger_zone:
+                color = (0, 0, 255)
+                prefix = "[!]"
+            else:
+                color = (0, 255, 255)
+                prefix = ""
+
+            # Indicador de cor
+            cv2.circle(output, (panel_x + 12, y_off), 4, color, -1)
+
+            # Nome
+            name = struct.abbreviation or struct.name[:8]
+            cv2.putText(output, f"{prefix}{name}", (panel_x + 22, y_off + 4),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.32, color, 1, cv2.LINE_AA)
+
+            # CSA/Confiança
+            if struct.area_mm2:
+                info = f"{struct.area_mm2:.1f}mm²"
+            else:
+                info = f"{struct.confidence:.0%}"
+            cv2.putText(output, info, (panel_x + 110, y_off + 4),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.28, (150, 150, 180), 1, cv2.LINE_AA)
+
+            y_off += 28
+
+        # Contagem no rodapé
+        nerve_count = sum(1 for s in identified if 'nerve' in str(s.structure_type.value).lower())
+        vessel_count = len(identified) - nerve_count
+        cv2.putText(output, f"Nervos:{nerve_count} Vasos:{vessel_count}",
+                   (panel_x + 8, panel_y + panel_h - 8),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (100, 100, 120), 1, cv2.LINE_AA)
 
         return output
+
+    def set_nerve_block(self, block_id: str) -> bool:
+        """
+        Define o tipo de bloqueio nervoso para identificação contextual.
+
+        Args:
+            block_id: ID do bloqueio (ex: 'femoral', 'interscalene', 'tap')
+
+        Returns:
+            True se bloqueio foi definido com sucesso
+        """
+        self.nerve_block_id = block_id
+
+        # Atualizar atlas educacional (funciona sempre)
+        if self.educational_atlas is not None:
+            try:
+                self.educational_atlas.set_block(block_id)
+                logger.info(f"Atlas atualizado para bloqueio: {block_id}")
+            except Exception as e:
+                logger.warning(f"Erro ao atualizar atlas: {e}")
+
+        # Atualizar NERVE TRACK system
+        if self.nerve_track_available and self.nerve_track_system:
+            try:
+                self.nerve_track_system.set_block(block_id)
+                logger.info(f"NERVE TRACK atualizado para bloqueio: {block_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Erro ao definir bloqueio no NERVE TRACK: {e}")
+                return False
+
+        # Retorna True se pelo menos o atlas foi atualizado
+        return self.educational_atlas is not None
+
+    def get_available_nerve_blocks(self) -> dict:
+        """
+        Retorna lista de bloqueios nervosos disponíveis.
+
+        Returns:
+            Dict de {block_id: nome_do_bloqueio}
+        """
+        return self.available_nerve_blocks
+
+    def get_nerve_block_info(self, block_id: str = None) -> dict:
+        """
+        Retorna informações detalhadas de um bloqueio.
+
+        Args:
+            block_id: ID do bloqueio (usa atual se None)
+
+        Returns:
+            Dict com informações do bloqueio
+        """
+        if not NERVE_TRACK_AVAILABLE:
+            return {}
+
+        try:
+            bid = block_id or self.nerve_block_id
+            if bid:
+                block = get_block_config(bid)
+                if block:
+                    return {
+                        'id': block.id,
+                        'name': block.name,
+                        'name_en': block.name_en,
+                        'region': block.region.value,
+                        'targets': [t.name for t in block.targets],
+                        'danger_zones': [d.name for d in block.danger_zones],
+                        'probe_type': block.probe_type,
+                        'depth_cm': block.depth_cm,
+                        'skill_level': block.skill_level,
+                    }
+        except Exception as e:
+            logger.error(f"Erro ao obter info do bloqueio: {e}")
+
+        return {}
 
     def _cv_nerve_enhance(self, frame):
         """Realce de estruturas nervosas por CV."""
