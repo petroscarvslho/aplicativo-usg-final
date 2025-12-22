@@ -1,6 +1,24 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-22 - Sessao 12: Pesquisa Externa (Apps, AI, GitHub, Reddit)
+====================================================================
+
+### Resumo
+Pesquisa extensa de referencia externa para melhorar o app, cobrindo
+apps pagos, sistemas comerciais, ferramentas AI, datasets e repositorios.
+
+### Entregas
+1. **REFERENCIAS.md** atualizado com:
+   - Comparativos de handheld/POCUS
+   - Links oficiais de apps e sistemas
+   - AI tools comerciais (Clarius, Butterfly, GE, Philips)
+   - Papers/whitepapers (FAST, B-lines, EF, bladder)
+   - Datasets e repos GitHub
+   - Threads relevantes no Reddit
+   - Lista de features "premium" para roadmap
+
+====================================================================
 ## 2025-12-22 - Sessao 11: FAST Protocol - Fallback CV Otimizado
 ====================================================================
 

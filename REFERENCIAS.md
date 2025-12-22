@@ -117,6 +117,13 @@
 - r/MachineLearning
 - r/ultrasound
 
+### Reddit - Threads relevantes (handheld/POCUS)
+- https://www.reddit.com/r/medicine/comments/jmamoo/handheld_us_butterfly_vs_clarius/
+- https://www.reddit.com/r/medicine/comments/t8yi7h/best_handheld_ultrasound_for_use_in_hospital/
+- https://www.reddit.com/r/Radiology/comments/1cnzuem/pocket_ultrasound_butterfly_etc/
+- https://www.reddit.com/r/emergencymedicine/comments/14qz7sv/handheld_ultrasounds_for_emergency_physicians/
+- https://www.reddit.com/r/Ultrasound/comments/yje7kd/which_portable_ultrasound_device_to_purchase/
+
 ### Stack Overflow Tags
 - [opencv]
 - [python]
@@ -124,6 +131,83 @@
 - [pytorch]
 
 ---
+
+## Apps pagos e sistemas comerciais (POCUS/handheld)
+
+### Comparativos e reviews
+- https://drsono.com/blogs/news/vscan-air-vs-clarius-vs-butterfly-iq-vs-drsono/
+- https://journalfeed.org/article-a-day/2024/six-handheld-pocus-devices-compete-who-wins/
+- https://ultrasoundfanatic.com/best-portable-ultrasound/
+- https://www.gehealthcare.com/-/jssmedia/global/files/vscan-air/competetive-comparison-handheld-ultrasound-devices.pdf
+
+### Plataformas e apps oficiais
+- Butterfly iQ: https://www.butterflynetwork.com/ + https://apps.apple.com/us/app/butterfly-iq-ultrasound/id1183035589
+- Clarius: https://clarius.com/ + https://apps.apple.com/us/app/clarius-ultrasound-app/id1140165095
+- Philips Lumify: https://www.usa.philips.com/healthcare/sites/lumify-handheld-ultrasound/ + https://apps.apple.com/us/app/lumify-handheld-ultrasound/id6446034492
+- GE Vscan Air: https://www.gehealthcare.com/products/ultrasound/handheld-ultrasound/vscan-air
+- Mindray (smart bladder/handheld): https://www.mindray.com/
+
+---
+
+## Ferramentas AI comerciais (inspiracao de features)
+
+### Clarius AI (T-Mode, Auto Preset, Auto Heart Rate, Auto Gain, Vessel Depth, MSK/OB/Prostate/Bladder)
+- https://clarius.com/technology/clarius-ai/
+- https://clarius.com/technology/bladder-ai/
+
+### Butterfly Auto B-lines (contagem automatica de B-lines)
+- https://www.butterflynetwork.com/press-releases/fda-clearance-butterfly-auto-b-lines-ai-tool
+
+### GE Caption AI / AutoEF / Auto Bladder (Vscan Air)
+- AutoEF whitepaper: https://www.gehealthcare.com/-/jssmedia/gehc/us/files/products/ultrasound/handheld-ultrasound/caption-ai-autoef-whitepaper_jb30471xx_v3.pdf
+- Auto Bladder whitepaper: https://www.gehealthcare.com/-/jssmedia/gehc/us/files/products/ultrasound/handheld-ultrasound/cl/whitepaper-vscan-air-auto-bladder-volume-november-2025-jb35636xx.pdf
+
+### Outros exemplos de AI (Auto B-lines / AutoEF)
+- https://www.standardultrasound.com/ultrasound-tools/auto-b-lines
+- https://www.standardultrasound.com/ultrasound-tools/ai-based-autoef
+- Philips AI ultrasound tech: https://www.philips.ae/healthcare/technology/ai-ultrasound
+
+---
+
+## Papers e whitepapers utilitarios (FAST, B-lines, EF, Bladder)
+- Deep learning free fluid (FAST/Morrison): https://www.frontiersin.org/journals/medicine/articles/10.3389/fmed.2021.707437/full
+- B-lines reliability: https://pubmed.ncbi.nlm.nih.gov/23269716/
+- Lung US review: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7929643/
+- Auto B-lines FDA clearance (Butterfly): https://www.butterflynetwork.com/press-releases/fda-clearance-butterfly-auto-b-lines-ai-tool
+- Bladder US practice evidence: https://pubmed.ncbi.nlm.nih.gov/37721338/
+
+---
+
+## Datasets e benchmarks (ultrassom)
+- EchoNet-Dynamic: https://echonet.github.io/dynamic/ + https://github.com/echonet/dynamic
+- CAMUS: https://www.creatis.insa-lyon.fr/Challenge/camus/
+- Kaggle Nerve Segmentation: https://www.kaggle.com/c/ultrasound-nerve-segmentation
+- POCUS/COVID-19 US: https://github.com/jannisborn/covid19_ultrasound
+- Open Ultrasound Projects (hardware + software): https://kelu124.github.io/openultrasoundprojects/
+- MedSegBench (benchmark): https://medsegbench.github.io/
+
+---
+
+## Repositorios GitHub relevantes (IA para US)
+- Needle tracking: https://github.com/DeeplearningBILAB/Ultrasound-guided-needle-tracking-with-deep-learning
+- Needles in ultrasound: https://github.com/Misitlab/needles-in-ultrasound
+- B-lines detection: https://github.com/RTLucassen/B-line_detection
+- Ultrasound segmentation: https://github.com/luke-ck/ultrasound-segmentation
+- UltraSAM (foundation model US): https://github.com/CAMMA-public/UltraSam
+- POCUS COVID dataset code: https://github.com/jannisborn/covid19_ultrasound
+
+---
+
+## Ideias de features para deixar o app "premium"
+- Auto Preset/Auto Gain (inspiracao Clarius AI) para reduzir ajustes manuais
+- Auto Heart Rate e Vessel Depth AI (HUD automatico durante o exame)
+- Auto B-lines (contagem automatica + score por janela)
+- Auto Bladder Volume com validacao por duas vistas (sagital + transversal)
+- AutoEF com tracking temporal do LV (clip curto + media robusta)
+- Workflow guiado FAST (checklist + auto-sugestao de janela)
+- T-Mode educacional (overlay anatomico para treinamento)
+- Scan quality score (aviso de foco/ganho/ruido)
+- Report generator (PDF/DICOM + export de medidas)
 
 ## Versoes Utilizadas
 

@@ -207,6 +207,8 @@ Arquivos de pesquisa em:
 - Export automatico de pesos para `models/` com metadata `.meta.json`.
 - Novo script `training/train_yolo.py` para YOLO (NEEDLE/FAST).
 - VASST no app agora le metadata e suporta label order/scale automaticamente.
+- REFERENCIAS.md expandido com pesquisa externa (apps pagos, AI comerciais,
+  papers/whitepapers, datasets, repos GitHub e threads do Reddit).
 
 ====================================================================
 ## PROJETOS RELACIONADOS
