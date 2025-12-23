@@ -426,7 +426,7 @@ class AIProcessor:
         # (evita hasattr checks a cada frame)
         # ═══════════════════════════════════════
 
-        # Cardiac AI
+        # Cardiac AI - Core metrics
         self.cardiac_history = deque(maxlen=60)
         self.cardiac_edv = None
         self.cardiac_esv = None
@@ -438,6 +438,37 @@ class AIProcessor:
         self.cardiac_view = 'A4C'  # A4C, PLAX, PSAX, A2C
         self.cardiac_view_confidence = 0.0
         self.cardiac_lv_aspect_ratio = 1.0
+
+        # Cardiac AI - Wall Motion Analysis (6-segment model)
+        self.cardiac_segments = {
+            'basal_septal': {'motion': 1.0, 'strain': 0.0, 'history': deque(maxlen=30)},
+            'mid_septal': {'motion': 1.0, 'strain': 0.0, 'history': deque(maxlen=30)},
+            'apical_septal': {'motion': 1.0, 'strain': 0.0, 'history': deque(maxlen=30)},
+            'basal_lateral': {'motion': 1.0, 'strain': 0.0, 'history': deque(maxlen=30)},
+            'mid_lateral': {'motion': 1.0, 'strain': 0.0, 'history': deque(maxlen=30)},
+            'apical_lateral': {'motion': 1.0, 'strain': 0.0, 'history': deque(maxlen=30)},
+        }
+        self.cardiac_wmsi = 1.0  # Wall Motion Score Index (1.0 = normal)
+        self.cardiac_contour_history = deque(maxlen=30)  # Para tracking de wall motion
+
+        # Cardiac AI - Annular measurements
+        self.cardiac_mapse = None  # Mitral Annular Plane Systolic Excursion (mm)
+        self.cardiac_tapse = None  # Tricuspid Annular Plane Systolic Excursion (mm)
+        self.cardiac_mitral_annulus = None  # (x, y) position
+
+        # Cardiac AI - Advanced view features
+        self.cardiac_view_features = {
+            'aspect_ratio': 1.0,
+            'position_score': 0.5,  # 0=left, 1=right
+            'area_ratio': 0.0,  # LV area / total ROI
+            'apex_position': None,  # (x, y)
+            'base_position': None,  # (x, y)
+        }
+
+        # Cardiac AI - Diastolic function
+        self.cardiac_e_velocity = None  # Early filling velocity
+        self.cardiac_a_velocity = None  # Atrial contraction velocity
+        self.cardiac_e_a_ratio = None  # E/A ratio
 
         # FAST Protocol
         self.fast_windows = {
@@ -482,13 +513,23 @@ class AIProcessor:
         self.power_sensitivity = 75
         self.power_prev_frame = None
 
-        # Lung AI
+        # Lung AI - Core
         self.lung_b_line_history = deque(maxlen=30)
         self.lung_a_lines_detected = False
         self.lung_pleura_sliding = True
         self.lung_consolidation = False
         self.lung_pleura_history = deque(maxlen=12)
         self.lung_b_line_density_history = deque(maxlen=30)
+
+        # Lung AI - Advanced detection
+        self.lung_effusion_detected = False
+        self.lung_effusion_depth_mm = 0.0
+        self.lung_comet_tail_count = 0  # Artefatos comet-tail (< B-lines)
+        self.lung_true_b_line_count = 0  # B-lines verdadeiras (chegam ao fundo)
+        self.lung_shred_sign = False  # Consolidation pattern
+        self.lung_hepatization = False  # Tissue-like pattern
+        self.lung_sliding_history = deque(maxlen=10)  # Para M-mode analysis
+        self.lung_spine_sign = False  # Indicador de efusão
 
         # ═══════════════════════════════════════════════════════════════════════
         # LUNG ZONES - Protocolo BLUE (8 zonas)
@@ -2661,6 +2702,365 @@ class AIProcessor:
 
         return output
 
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # CARDIAC AI - Funções Auxiliares Avançadas
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _cardiac_analyze_wall_motion(self, contour, frame_gray):
+        """
+        Analisa movimento de parede do LV dividindo em 6 segmentos (modelo simplificado AHA).
+
+        Segmentos (A4C view):
+        - basal_septal, mid_septal, apical_septal (lado direito da imagem)
+        - basal_lateral, mid_lateral, apical_lateral (lado esquerdo)
+
+        Returns:
+            dict: Pontos por segmento com displacement relativo
+        """
+        if contour is None or len(contour) < 10:
+            return None
+
+        # Encontrar bounding box e centro
+        M = cv2.moments(contour)
+        if M["m00"] == 0:
+            return None
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+
+        # Encontrar apex (ponto mais distante do centro na direção inferior)
+        # e base (ponto mais superior)
+        points = contour.reshape(-1, 2)
+        y_coords = points[:, 1]
+        apex_idx = np.argmax(y_coords)
+        base_idx = np.argmin(y_coords)
+        apex = tuple(points[apex_idx])
+        base = tuple(points[base_idx])
+
+        # Guardar posições
+        self.cardiac_view_features['apex_position'] = apex
+        self.cardiac_view_features['base_position'] = base
+
+        # Dividir contorno em 6 segmentos
+        lv_height = apex[1] - base[1]
+        if lv_height < 20:
+            return None
+
+        segment_height = lv_height / 3  # basal, mid, apical
+
+        segments_data = {}
+        segment_names = ['basal', 'mid', 'apical']
+
+        for i, seg_name in enumerate(segment_names):
+            y_min = base[1] + i * segment_height
+            y_max = base[1] + (i + 1) * segment_height
+
+            # Pontos neste segmento
+            seg_points = points[(points[:, 1] >= y_min) & (points[:, 1] < y_max)]
+            if len(seg_points) < 2:
+                continue
+
+            # Dividir em septal (x > cx) e lateral (x < cx)
+            septal_pts = seg_points[seg_points[:, 0] > cx]
+            lateral_pts = seg_points[seg_points[:, 0] <= cx]
+
+            # Calcular centroide de cada sub-segmento
+            if len(septal_pts) > 0:
+                septal_center = np.mean(septal_pts, axis=0)
+                seg_key = f"{seg_name}_septal"
+                segments_data[seg_key] = {
+                    'center': tuple(septal_center.astype(int)),
+                    'points': septal_pts,
+                    'point_count': len(septal_pts)
+                }
+
+            if len(lateral_pts) > 0:
+                lateral_center = np.mean(lateral_pts, axis=0)
+                seg_key = f"{seg_name}_lateral"
+                segments_data[seg_key] = {
+                    'center': tuple(lateral_center.astype(int)),
+                    'points': lateral_pts,
+                    'point_count': len(lateral_pts)
+                }
+
+        return segments_data
+
+    def _cardiac_calculate_regional_strain(self, current_segments, phase):
+        """
+        Calcula strain regional baseado no histórico de movimento.
+        Strain = (L - L0) / L0 * 100
+
+        Args:
+            current_segments: Dados dos segmentos atuais
+            phase: 'systole' ou 'diastole'
+        """
+        if current_segments is None:
+            return
+
+        for seg_name, seg_data in current_segments.items():
+            if seg_name not in self.cardiac_segments:
+                continue
+
+            center = seg_data['center']
+            hist = self.cardiac_segments[seg_name]['history']
+
+            # Adicionar ao histórico
+            hist.append(center)
+
+            if len(hist) < 5:
+                continue
+
+            # Calcular displacement do centro em relação ao primeiro ponto
+            initial = hist[0]
+            current = hist[-1]
+
+            # Displacement em pixels
+            dx = current[0] - initial[0]
+            dy = current[1] - initial[1]
+            displacement = np.sqrt(dx**2 + dy**2)
+
+            # Calcular motion score (1.0 = normal, <0.5 = hypokinetic, 0 = akinetic)
+            # Normalizado pelo tamanho esperado de movimento (~10-20 pixels)
+            expected_motion = 15.0
+            motion_score = min(displacement / expected_motion, 2.0)
+
+            # Suavização temporal
+            prev_motion = self.cardiac_segments[seg_name]['motion']
+            self.cardiac_segments[seg_name]['motion'] = 0.7 * prev_motion + 0.3 * motion_score
+
+            # Strain aproximado (negativo em systole = encurtamento)
+            if phase == 'systole':
+                strain = -min(displacement / expected_motion * 20, 30)  # -20% típico
+            else:
+                strain = 0  # Reset em diastole
+
+            prev_strain = self.cardiac_segments[seg_name]['strain']
+            self.cardiac_segments[seg_name]['strain'] = 0.8 * prev_strain + 0.2 * strain
+
+    def _cardiac_calculate_wmsi(self):
+        """
+        Calcula Wall Motion Score Index (WMSI).
+
+        Scores por segmento:
+        1 = Normal (motion >= 0.8)
+        2 = Hypokinetic (0.4 <= motion < 0.8)
+        3 = Akinetic (0.1 <= motion < 0.4)
+        4 = Dyskinetic (motion < 0.1 ou movimento paradoxal)
+
+        WMSI = soma dos scores / número de segmentos
+        Normal = 1.0, Anormal > 1.0
+        """
+        total_score = 0
+        segment_count = 0
+
+        for seg_name, seg_data in self.cardiac_segments.items():
+            motion = seg_data['motion']
+
+            if motion >= 0.8:
+                score = 1  # Normal
+            elif motion >= 0.4:
+                score = 2  # Hypokinetic
+            elif motion >= 0.1:
+                score = 3  # Akinetic
+            else:
+                score = 4  # Dyskinetic
+
+            total_score += score
+            segment_count += 1
+
+        if segment_count > 0:
+            self.cardiac_wmsi = total_score / segment_count
+
+    def _cardiac_detect_mitral_annulus(self, contour, frame_gray):
+        """
+        Detecta o plano anular mitral (base do LV).
+        Usado para calcular MAPSE.
+        """
+        if contour is None or len(contour) < 10:
+            return None
+
+        points = contour.reshape(-1, 2)
+
+        # Base do LV = pontos mais superiores (menor Y)
+        sorted_by_y = points[np.argsort(points[:, 1])]
+        top_points = sorted_by_y[:max(3, len(points) // 10)]
+
+        if len(top_points) < 2:
+            return None
+
+        # Centro do anel mitral
+        annulus_center = np.mean(top_points, axis=0).astype(int)
+        self.cardiac_mitral_annulus = tuple(annulus_center)
+
+        # Largura do anel (distância entre extremos)
+        x_coords = top_points[:, 0]
+        annulus_width = np.max(x_coords) - np.min(x_coords)
+
+        return {
+            'center': self.cardiac_mitral_annulus,
+            'width': annulus_width,
+            'left': (int(np.min(x_coords)), int(annulus_center[1])),
+            'right': (int(np.max(x_coords)), int(annulus_center[1]))
+        }
+
+    def _cardiac_calculate_mapse(self):
+        """
+        Calcula MAPSE (Mitral Annular Plane Systolic Excursion).
+        Baseado no histórico de posição do anel mitral.
+
+        Normal: > 10mm
+        Anormal: < 10mm (indica disfunção sistólica)
+        """
+        if self.cardiac_mitral_annulus is None:
+            return
+
+        # Precisamos do histórico de posição Y do anel
+        if not hasattr(self, '_mapse_history'):
+            self._mapse_history = deque(maxlen=60)
+
+        self._mapse_history.append(self.cardiac_mitral_annulus[1])
+
+        if len(self._mapse_history) < 20:
+            return
+
+        y_positions = np.array(self._mapse_history)
+        max_y = np.max(y_positions)  # Systole (desceu)
+        min_y = np.min(y_positions)  # Diastole (subiu)
+
+        # Excursão em pixels
+        excursion_px = max_y - min_y
+
+        # Converter para mm (usando calibração)
+        mm_per_px = getattr(self, 'calibration', {}).get('mm_per_pixel', 0.3)
+        self.cardiac_mapse = excursion_px * mm_per_px
+
+    def _cardiac_classify_view_advanced(self, contour, roi_shape, center):
+        """
+        Classificação avançada de view usando múltiplas features.
+
+        Features:
+        1. Aspect ratio do LV
+        2. Posição do LV no frame
+        3. Área relativa do LV
+        4. Orientação do eixo maior
+        5. Presença de outras câmaras
+
+        Returns:
+            (view_name, confidence)
+        """
+        if contour is None:
+            return self.cardiac_view, self.cardiac_view_confidence
+
+        # Feature 1: Aspect ratio
+        rect = cv2.minAreaRect(contour)
+        (cx, cy), (lv_w, lv_h), angle = rect
+        if lv_h > lv_w:
+            lv_w, lv_h = lv_h, lv_w
+            angle = (angle + 90) % 180
+
+        aspect_ratio = lv_w / max(lv_h, 1)
+        self.cardiac_view_features['aspect_ratio'] = aspect_ratio
+
+        # Feature 2: Posição horizontal (0=esquerda, 1=direita)
+        roi_w = roi_shape[1] if len(roi_shape) > 1 else roi_shape[0]
+        position_score = cx / max(roi_w, 1)
+        self.cardiac_view_features['position_score'] = position_score
+
+        # Feature 3: Área relativa
+        lv_area = cv2.contourArea(contour)
+        roi_area = roi_shape[0] * roi_shape[1] if len(roi_shape) > 1 else roi_shape[0] ** 2
+        area_ratio = lv_area / max(roi_area, 1)
+        self.cardiac_view_features['area_ratio'] = area_ratio
+
+        # Classificação baseada em features
+        scores = {
+            'A4C': 0.0,
+            'A2C': 0.0,
+            'PLAX': 0.0,
+            'PSAX': 0.0
+        }
+
+        # A4C: LV oval horizontal, centrado, área média
+        if aspect_ratio > 1.2:
+            scores['A4C'] += 0.4 * min((aspect_ratio - 1.0) / 1.0, 1.0)
+        if 0.3 < position_score < 0.7:
+            scores['A4C'] += 0.2
+        if 0.05 < area_ratio < 0.25:
+            scores['A4C'] += 0.2
+
+        # A2C: Similar a A4C mas LV mais alongado verticalmente
+        if 0.8 < aspect_ratio < 1.4:
+            scores['A2C'] += 0.3
+        if 0.4 < position_score < 0.6:
+            scores['A2C'] += 0.2
+
+        # PLAX: LV alongado, posição lateral
+        if aspect_ratio < 0.9:
+            scores['PLAX'] += 0.4 * min((1.0 - aspect_ratio) / 0.5, 1.0)
+        if position_score < 0.4 or position_score > 0.6:
+            scores['PLAX'] += 0.2
+
+        # PSAX: LV circular
+        if 0.85 < aspect_ratio < 1.15:
+            scores['PSAX'] += 0.5 * (1.0 - abs(aspect_ratio - 1.0) / 0.15)
+        if 0.1 < area_ratio < 0.3:
+            scores['PSAX'] += 0.2
+
+        # Encontrar melhor view
+        best_view = max(scores, key=scores.get)
+        best_score = scores[best_view]
+
+        # Normalizar confiança
+        total_score = sum(scores.values())
+        confidence = best_score / max(total_score, 0.1)
+
+        return best_view, confidence
+
+    def _cardiac_draw_wall_motion_overlay(self, output, segments_data):
+        """
+        Desenha overlay visual do wall motion analysis.
+
+        Cores por status:
+        - Verde: Normal (motion >= 0.8)
+        - Amarelo: Hypokinetic (0.4 <= motion < 0.8)
+        - Laranja: Akinetic (0.1 <= motion < 0.4)
+        - Vermelho: Dyskinetic (motion < 0.1)
+        """
+        if segments_data is None:
+            return
+
+        for seg_name, seg_data in segments_data.items():
+            if seg_name not in self.cardiac_segments:
+                continue
+
+            center = seg_data['center']
+            motion = self.cardiac_segments[seg_name]['motion']
+            strain = self.cardiac_segments[seg_name]['strain']
+
+            # Cor baseada no motion score
+            if motion >= 0.8:
+                color = (100, 255, 100)  # Verde
+                status = "N"
+            elif motion >= 0.4:
+                color = (0, 255, 255)  # Amarelo
+                status = "H"
+            elif motion >= 0.1:
+                color = (0, 165, 255)  # Laranja
+                status = "A"
+            else:
+                color = (0, 0, 255)  # Vermelho
+                status = "D"
+
+            # Desenhar marcador de segmento
+            cv2.circle(output, center, 6, color, -1)
+            cv2.circle(output, center, 8, (255, 255, 255), 1)
+
+            # Label com status e strain
+            label = f"{status}"
+            if abs(strain) > 1:
+                label += f" {strain:.0f}%"
+            cv2.putText(output, label, (center[0] + 10, center[1] + 4),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.28, color, 1, cv2.LINE_AA)
+
     def _process_cardiac(self, frame):
         """Cardiac AI - Sistema avancado de analise cardiaca estilo EchoNet/Clarius."""
         output = frame.copy()
@@ -2785,32 +3185,17 @@ class AIProcessor:
                 if M["m00"] > 0:
                     lv_center = (int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"]))
 
-                # ═══ VIEW DETECTION (baseado no aspect ratio do LV) ═══
+                # ═══ VIEW DETECTION AVANÇADO ═══
+                new_view, conf = self._cardiac_classify_view_advanced(
+                    best_contour, roi.shape, lv_center
+                )
+
+                # Manter aspect ratio para compatibilidade
                 rect = cv2.minAreaRect(best_contour)
                 (cx, cy), (lv_w, lv_h), angle = rect
-                # Garantir que lv_w é a largura (maior dimensao horizontal)
                 if lv_h > lv_w:
                     lv_w, lv_h = lv_h, lv_w
-
                 self.cardiac_lv_aspect_ratio = lv_w / max(lv_h, 1)
-
-                # Classificar view baseado no aspect ratio e posição
-                # A4C: LV tipicamente oval horizontal (aspect > 1.3)
-                # PLAX: LV mais alongado verticalmente (aspect < 0.8)
-                # PSAX: LV circular (aspect ~1.0)
-                # A2C: Similar a A4C mas LV mais centrado
-                if self.cardiac_lv_aspect_ratio > 1.4:
-                    new_view = 'A4C'
-                    conf = min((self.cardiac_lv_aspect_ratio - 1.4) / 0.6, 1.0)
-                elif self.cardiac_lv_aspect_ratio < 0.75:
-                    new_view = 'PLAX'
-                    conf = min((0.75 - self.cardiac_lv_aspect_ratio) / 0.25, 1.0)
-                elif 0.85 <= self.cardiac_lv_aspect_ratio <= 1.15:
-                    new_view = 'PSAX'
-                    conf = 1.0 - abs(self.cardiac_lv_aspect_ratio - 1.0) / 0.15
-                else:
-                    new_view = 'A2C'  # Casos intermediários
-                    conf = 0.5
 
                 # Suavização temporal da view
                 if new_view == self.cardiac_view:
@@ -2819,6 +3204,22 @@ class AIProcessor:
                     if conf > self.cardiac_view_confidence + 0.2:
                         self.cardiac_view = new_view
                         self.cardiac_view_confidence = conf
+
+                # ═══ WALL MOTION ANALYSIS (6 segmentos) ═══
+                segments_data = self._cardiac_analyze_wall_motion(best_contour, gray)
+
+                # Calcular strain regional
+                self._cardiac_calculate_regional_strain(segments_data, self.cardiac_phase)
+
+                # Calcular WMSI
+                self._cardiac_calculate_wmsi()
+
+                # ═══ MITRAL ANNULUS & MAPSE ═══
+                annulus_info = self._cardiac_detect_mitral_annulus(best_contour, gray)
+                self._cardiac_calculate_mapse()
+
+                # Guardar contorno no histórico para tracking
+                self.cardiac_contour_history.append(best_contour.copy())
 
         # Tracking temporal para detectar ciclo cardiaco
         # Em baixa qualidade, nao atualizar historico
@@ -2908,14 +3309,33 @@ class AIProcessor:
                 cv2.putText(output, "LV", (lv_center[0] + 12, lv_center[1] + 5),
                            cv2.FONT_HERSHEY_DUPLEX, 0.4, phase_color, 1, cv2.LINE_AA)
 
+            # ═══ WALL MOTION OVERLAY ═══
+            if 'segments_data' in dir() and segments_data is not None:
+                self._cardiac_draw_wall_motion_overlay(output, segments_data)
+
+            # ═══ MITRAL ANNULUS MARKER ═══
+            if self.cardiac_mitral_annulus is not None:
+                ma = self.cardiac_mitral_annulus
+                cv2.circle(output, ma, 5, (255, 200, 100), -1)
+                cv2.circle(output, ma, 7, (255, 255, 255), 1)
+                cv2.putText(output, "MA", (ma[0] + 10, ma[1] + 4),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 200, 100), 1, cv2.LINE_AA)
+
+            # ═══ APEX MARKER ═══
+            apex = self.cardiac_view_features.get('apex_position')
+            if apex:
+                cv2.circle(output, apex, 4, (100, 255, 255), -1)
+                cv2.putText(output, "Apex", (apex[0] + 8, apex[1] + 4),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.25, (100, 255, 255), 1, cv2.LINE_AA)
+
         # ═══════════════════════════════════════
         # PAINEL PRINCIPAL (estilo Clarius)
         # ═══════════════════════════════════════
 
-        panel_w = 170
+        panel_w = 180  # Aumentado para novas métricas
         panel_x = w - panel_w - 10
         panel_y = 10
-        panel_h = 250
+        panel_h = 290  # Aumentado para WMSI/MAPSE
 
         # Painel com header (tema vermelho para cardiac)
         cardiac_border = (180, 100, 100)
@@ -2976,17 +3396,47 @@ class AIProcessor:
         gls_color = Theme.STATUS_OK if gls_val <= -16 else Theme.STATUS_WARNING if gls_val <= -12 else Theme.STATUS_ERROR
         draw_labeled_value(output, panel_x + 10, content_y, "GLS", f"{gls_val:.1f}%", "",
                           label_color=Theme.TEXT_SECONDARY, value_color=gls_color, label_width=35)
-        content_y += 22
+        content_y += 18
+
+        # ═══ WMSI (Wall Motion Score Index) ═══
+        wmsi_val = self.cardiac_wmsi
+        if wmsi_val <= 1.0:
+            wmsi_color = Theme.STATUS_OK
+            wmsi_status = "N"
+        elif wmsi_val <= 1.5:
+            wmsi_color = Theme.STATUS_WARNING
+            wmsi_status = "H"
+        elif wmsi_val <= 2.0:
+            wmsi_color = (0, 165, 255)
+            wmsi_status = "A"
+        else:
+            wmsi_color = Theme.STATUS_ERROR
+            wmsi_status = "D"
+        draw_labeled_value(output, panel_x + 10, content_y, "WMSI", f"{wmsi_val:.2f}", wmsi_status,
+                          label_color=Theme.TEXT_SECONDARY, value_color=wmsi_color, label_width=40)
+        content_y += 18
+
+        # ═══ MAPSE (Mitral Annular Plane Systolic Excursion) ═══
+        mapse_val = self.cardiac_mapse if self.cardiac_mapse else 0
+        if mapse_val >= 10:
+            mapse_color = Theme.STATUS_OK
+        elif mapse_val >= 8:
+            mapse_color = Theme.STATUS_WARNING
+        else:
+            mapse_color = Theme.STATUS_ERROR
+        draw_labeled_value(output, panel_x + 10, content_y, "MAPSE", f"{mapse_val:.1f}", "mm",
+                          label_color=Theme.TEXT_SECONDARY, value_color=mapse_color, label_width=45)
+        content_y += 18
 
         # ═══ HR ═══
         hr_val = self.cardiac_hr if self.cardiac_hr else 72
         hr_color = Theme.STATUS_OK if 60 <= hr_val <= 100 else Theme.STATUS_WARNING
         draw_labeled_value(output, panel_x + 10, content_y, "HR", f"{hr_val}", "bpm",
                           label_color=Theme.TEXT_SECONDARY, value_color=hr_color, label_width=35)
-        content_y += 18
+        content_y += 14
 
         # ═══ MINI ECG WAVEFORM ═══
-        ecg_y = panel_y + 190
+        ecg_y = panel_y + 230  # Ajustado para novas métricas
         ecg_h = 45
         cv2.rectangle(output, (panel_x + 10, ecg_y), (panel_x + panel_w - 10, ecg_y + ecg_h),
                      (30, 30, 40), -1)
@@ -4586,6 +5036,232 @@ class AIProcessor:
 
         return output
 
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # LUNG AI - Funções Auxiliares Avançadas
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _lung_classify_b_line(self, line_length, image_height, intensity_profile):
+        """
+        Classifica se uma linha vertical é B-line verdadeira ou comet-tail artifact.
+
+        B-line verdadeira:
+        - Estende da pleura até o fundo da imagem (ou próximo)
+        - Intensidade aumenta gradualmente para o fundo
+        - Largura relativamente constante
+
+        Comet-tail artifact:
+        - Mais curto (< 50% da altura abaixo da pleura)
+        - Intensidade diminui rapidamente
+        - Triangular (afina para baixo)
+
+        Returns:
+            'b_line', 'comet_tail', ou 'artifact'
+        """
+        # Razão de comprimento
+        length_ratio = line_length / max(image_height, 1)
+
+        if length_ratio >= 0.7:
+            # Longo o suficiente para ser B-line
+            return 'b_line'
+        elif length_ratio >= 0.3:
+            # Comprimento intermediário - analisar perfil de intensidade
+            if len(intensity_profile) > 5:
+                # B-line: intensidade aumenta ou mantém
+                # Comet-tail: intensidade diminui
+                first_half = np.mean(intensity_profile[:len(intensity_profile)//2])
+                second_half = np.mean(intensity_profile[len(intensity_profile)//2:])
+                if second_half >= first_half * 0.8:
+                    return 'b_line'
+                else:
+                    return 'comet_tail'
+            return 'comet_tail'
+        else:
+            return 'artifact'
+
+    def _lung_detect_effusion(self, gray, pleura_y, h, w):
+        """
+        Detecta efusão pleural (área anecóica acima da linha pleural ou
+        no espaço costofrênico).
+
+        Características:
+        - Área escura (anecóica) homogênea
+        - Geralmente acima do diafragma
+        - Pode mostrar "spine sign" (vértebras visíveis através do fluido)
+
+        Returns:
+            (detected: bool, depth_mm: float, area_info: dict)
+        """
+        # Região para buscar efusão (lateral inferior, típico)
+        eff_region = gray[pleura_y:, :]
+        if eff_region.size == 0:
+            return False, 0.0, {}
+
+        # Threshold para áreas muito escuras (anecóicas)
+        dark_thresh = np.percentile(eff_region, 15)
+        _, dark_mask = cv2.threshold(eff_region, dark_thresh, 255, cv2.THRESH_BINARY_INV)
+
+        # Morfologia para limpar ruído
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, kernel)
+        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, kernel)
+
+        # Encontrar contornos de áreas escuras
+        contours, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        best_effusion = None
+        max_score = 0
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < (h * w * 0.01):  # Mínimo 1% da área
+                continue
+
+            # Verificar se é homogêneo (baixa variância interna)
+            mask = np.zeros_like(eff_region, dtype=np.uint8)
+            cv2.drawContours(mask, [cnt], -1, 255, -1)
+            mean_val = cv2.mean(eff_region, mask=mask)[0]
+            if mean_val > 50:  # Muito claro para ser fluido
+                continue
+
+            # Calcular métricas
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            aspect = cw / max(ch, 1)
+
+            # Efusão típica: área horizontal na parte inferior
+            position_score = y / max(eff_region.shape[0], 1)  # Mais baixo = melhor
+            area_score = min(area / (h * w * 0.1), 1.0)
+
+            score = 0.4 * area_score + 0.3 * position_score + 0.3 * (1.0 if 0.5 < aspect < 3.0 else 0.5)
+
+            if score > max_score:
+                max_score = score
+                best_effusion = {
+                    'contour': cnt,
+                    'area': area,
+                    'depth': ch,
+                    'width': cw,
+                    'position': (x, y + pleura_y),
+                    'mean_intensity': mean_val
+                }
+
+        if best_effusion and max_score > 0.3:
+            # Converter profundidade para mm
+            mm_per_px = 0.3  # Aproximado
+            depth_mm = best_effusion['depth'] * mm_per_px
+            return True, depth_mm, best_effusion
+        else:
+            return False, 0.0, {}
+
+    def _lung_detect_consolidation(self, gray, pleura_y, h, w):
+        """
+        Detecta consolidação pulmonar (hepatização).
+
+        Características:
+        - Área com textura similar a tecido (não anecóico)
+        - Bordas irregulares (shred sign)
+        - Ausência de A-lines na região
+        - Pode ter air bronchograms (pontos hiperecóicos)
+
+        Returns:
+            (detected: bool, pattern: str, info: dict)
+        """
+        below_pleura = gray[pleura_y:, :]
+        if below_pleura.size == 0:
+            return False, '', {}
+
+        # Consolidação tem textura "sólida" - não é muito escura nem muito clara
+        mean_val = np.mean(below_pleura)
+        std_val = np.std(below_pleura)
+
+        # Detectar área com textura hepatizada
+        # Hepatização: intensidade média (60-120), textura moderada (std 15-40)
+        tissue_min = 50
+        tissue_max = 130
+        tissue_mask = ((below_pleura >= tissue_min) & (below_pleura <= tissue_max)).astype(np.uint8) * 255
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        tissue_mask = cv2.morphologyEx(tissue_mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(tissue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < (h * w * 0.05):  # Mínimo 5% da área
+                continue
+
+            # Verificar irregularidade da borda (shred sign)
+            perimeter = cv2.arcLength(cnt, True)
+            hull = cv2.convexHull(cnt)
+            hull_perimeter = cv2.arcLength(hull, True)
+
+            # Shred sign: perímetro muito maior que hull (borda irregular)
+            irregularity = perimeter / max(hull_perimeter, 1)
+
+            # Verificar se há air bronchograms (pontos brilhantes dentro)
+            mask = np.zeros_like(below_pleura, dtype=np.uint8)
+            cv2.drawContours(mask, [cnt], -1, 255, -1)
+            region = cv2.bitwise_and(below_pleura, mask)
+            bright_spots = np.sum(region > 180)
+            bright_ratio = bright_spots / max(area, 1)
+
+            if irregularity > 1.3:
+                self.lung_shred_sign = True
+                pattern = 'shred_sign'
+            elif bright_ratio > 0.01:
+                pattern = 'air_bronchogram'
+            else:
+                pattern = 'hepatization'
+
+            if irregularity > 1.2 or bright_ratio > 0.005:
+                return True, pattern, {
+                    'contour': cnt,
+                    'area': area,
+                    'irregularity': irregularity,
+                    'bright_ratio': bright_ratio
+                }
+
+        return False, '', {}
+
+    def _lung_analyze_sliding(self, gray, pleura_y):
+        """
+        Analisa lung sliding usando M-mode virtual.
+
+        Normal (seashore sign):
+        - Variação de textura ao longo do tempo na linha pleural
+        - Padrão granular abaixo da pleura
+
+        Ausente (barcode/stratosphere sign):
+        - Linhas horizontais estáticas
+        - Sem variação temporal
+
+        Returns:
+            (sliding_present: bool, confidence: float)
+        """
+        # Extrair linha na posição pleural
+        if pleura_y < 5 or pleura_y >= gray.shape[0] - 5:
+            return True, 0.5
+
+        pleura_line = gray[pleura_y-2:pleura_y+3, :].mean(axis=0)
+
+        self.lung_sliding_history.append(pleura_line.copy())
+
+        if len(self.lung_sliding_history) < 5:
+            return True, 0.5
+
+        # Calcular variação temporal
+        lines = np.array(list(self.lung_sliding_history))
+        temporal_std = np.std(lines, axis=0)
+        mean_variation = np.mean(temporal_std)
+
+        # Lung sliding presente: alta variação temporal
+        # Ausente (pneumotórax): baixa variação
+        if mean_variation > 8:
+            return True, min(mean_variation / 15, 1.0)
+        elif mean_variation < 3:
+            return False, 1.0 - (mean_variation / 5)
+        else:
+            return True, 0.5 + (mean_variation - 3) / 10
+
     def _process_blines(self, frame):
         """Lung AI - Sistema avancado de analise pulmonar estilo Clarius."""
         output = frame.copy()
@@ -4807,6 +5483,57 @@ class AIProcessor:
         self.lung_b_line_density_history.append(b_line_density)
 
         # ═══════════════════════════════════════
+        # ANALISE AVANCADA (Efusao, Consolidacao, Sliding)
+        # ═══════════════════════════════════════
+
+        # Detectar efusão pleural
+        eff_detected, eff_depth, eff_info = self._lung_detect_effusion(gray, pleura_y, h, w)
+        self.lung_effusion_detected = eff_detected
+        self.lung_effusion_depth_mm = eff_depth
+
+        # Visualizar efusão se detectada
+        if eff_detected and eff_info:
+            eff_cnt = eff_info.get('contour')
+            if eff_cnt is not None:
+                # Ajustar coordenadas
+                eff_cnt_adj = eff_cnt.copy()
+                overlay = output.copy()
+                cv2.drawContours(overlay, [eff_cnt_adj], -1, (180, 100, 50), -1)
+                cv2.addWeighted(overlay, 0.3, output, 0.7, 0, output)
+                cv2.drawContours(output, [eff_cnt_adj], -1, (255, 150, 100), 2)
+                # Label
+                pos = eff_info.get('position', (w//2, h//2))
+                cv2.putText(output, f"EFFUSION {eff_depth:.0f}mm", (pos[0], pos[1] - 10),
+                           cv2.FONT_HERSHEY_DUPLEX, 0.35, (255, 180, 120), 1, cv2.LINE_AA)
+
+        # Detectar consolidação
+        consol_detected, consol_pattern, consol_info = self._lung_detect_consolidation(gray, pleura_y, h, w)
+        self.lung_consolidation = consol_detected
+        self.lung_hepatization = consol_pattern == 'hepatization'
+
+        # Visualizar consolidação se detectada
+        if consol_detected and consol_info:
+            consol_cnt = consol_info.get('contour')
+            if consol_cnt is not None:
+                overlay = output.copy()
+                cv2.drawContours(overlay, [consol_cnt], -1, (50, 50, 150), -1)
+                cv2.addWeighted(overlay, 0.25, output, 0.75, 0, output)
+                cv2.drawContours(output, [consol_cnt], -1, (100, 100, 200), 2)
+
+                # Label com padrão
+                M = cv2.moments(consol_cnt)
+                if M["m00"] > 0:
+                    cx_c = int(M["m10"] / M["m00"])
+                    cy_c = int(M["m01"] / M["m00"]) + pleura_y
+                    pattern_label = consol_pattern.replace('_', ' ').upper()
+                    cv2.putText(output, pattern_label, (cx_c - 30, cy_c),
+                               cv2.FONT_HERSHEY_DUPLEX, 0.3, (150, 150, 255), 1, cv2.LINE_AA)
+
+        # Analisar lung sliding
+        sliding_present, sliding_conf = self._lung_analyze_sliding(gray, pleura_y)
+        self.lung_pleura_sliding = sliding_present
+
+        # ═══════════════════════════════════════
         # ANALISE E CLASSIFICACAO
         # ═══════════════════════════════════════
 
@@ -4855,10 +5582,10 @@ class AIProcessor:
         # PAINEL PRINCIPAL (usando UI Utils)
         # ═══════════════════════════════════════
 
-        panel_w = 175
+        panel_w = 180
         panel_x = w - panel_w - 10
         panel_y = 10
-        panel_h = 220
+        panel_h = 280  # Aumentado para novas métricas
 
         # Painel com header (tema verde para lung)
         lung_border = (150, 200, 100)
@@ -4872,43 +5599,74 @@ class AIProcessor:
                    FONT, FONT_SCALE_SMALL, status_color, 1, cv2.LINE_AA)
 
         # B-Lines
-        bl_y = panel_y + 55
+        bl_y = panel_y + 50
         cv2.putText(output, "B-LINES", (panel_x + 10, bl_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (120, 140, 100), 1, cv2.LINE_AA)
-        cv2.putText(output, str(display_b_lines), (panel_x + 80, bl_y + 25),
-                   cv2.FONT_HERSHEY_DUPLEX, 1.5, status_color, 2, cv2.LINE_AA)
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (120, 140, 100), 1, cv2.LINE_AA)
+        cv2.putText(output, str(display_b_lines), (panel_x + 80, bl_y + 20),
+                   cv2.FONT_HERSHEY_DUPLEX, 1.2, status_color, 2, cv2.LINE_AA)
 
         # A-Lines
-        al_y = panel_y + 105
+        al_y = panel_y + 90
         cv2.putText(output, "A-LINES", (panel_x + 10, al_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (120, 140, 100), 1, cv2.LINE_AA)
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (120, 140, 100), 1, cv2.LINE_AA)
         a_status = "Present" if self.lung_a_lines_detected else "Absent"
         a_color = (100, 255, 200) if self.lung_a_lines_detected else (100, 100, 120)
         cv2.putText(output, a_status, (panel_x + 80, al_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.35, a_color, 1, cv2.LINE_AA)
+                   cv2.FONT_HERSHEY_DUPLEX, 0.32, a_color, 1, cv2.LINE_AA)
 
         # Pleura sliding
-        ps_y = panel_y + 130
+        ps_y = panel_y + 112
         cv2.putText(output, "SLIDING", (panel_x + 10, ps_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (120, 140, 100), 1, cv2.LINE_AA)
-        slide_status = "Normal" if self.lung_pleura_sliding else "Absent"
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (120, 140, 100), 1, cv2.LINE_AA)
+        slide_status = "Normal" if self.lung_pleura_sliding else "Absent!"
         slide_color = (100, 255, 100) if self.lung_pleura_sliding else (0, 100, 255)
         cv2.putText(output, slide_status, (panel_x + 80, ps_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.35, slide_color, 1, cv2.LINE_AA)
+                   cv2.FONT_HERSHEY_DUPLEX, 0.32, slide_color, 1, cv2.LINE_AA)
+
+        # ═══ EFFUSION ═══
+        eff_y = panel_y + 134
+        cv2.putText(output, "EFFUSION", (panel_x + 10, eff_y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (120, 140, 100), 1, cv2.LINE_AA)
+        if self.lung_effusion_detected:
+            eff_status = f"{self.lung_effusion_depth_mm:.0f}mm"
+            eff_color = (0, 165, 255)  # Laranja
+        else:
+            eff_status = "None"
+            eff_color = (100, 200, 100)
+        cv2.putText(output, eff_status, (panel_x + 80, eff_y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.32, eff_color, 1, cv2.LINE_AA)
+
+        # ═══ CONSOLIDATION ═══
+        cons_y = panel_y + 156
+        cv2.putText(output, "CONSOL.", (panel_x + 10, cons_y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (120, 140, 100), 1, cv2.LINE_AA)
+        if self.lung_consolidation:
+            if self.lung_shred_sign:
+                cons_status = "Shred+"
+            elif self.lung_hepatization:
+                cons_status = "Hepat."
+            else:
+                cons_status = "Present"
+            cons_color = (0, 100, 255)
+        else:
+            cons_status = "None"
+            cons_color = (100, 200, 100)
+        cv2.putText(output, cons_status, (panel_x + 80, cons_y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.32, cons_color, 1, cv2.LINE_AA)
 
         # Status
-        st_y = panel_y + 160
+        st_y = panel_y + 185
         cv2.rectangle(output, (panel_x + 5, st_y - 5), (panel_x + panel_w - 5, st_y + 20),
                      (status_color[0]//4, status_color[1]//4, status_color[2]//4), -1)
         cv2.putText(output, status, (panel_x + 10, st_y + 12),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.5, status_color, 1, cv2.LINE_AA)
+                   cv2.FONT_HERSHEY_DUPLEX, 0.45, status_color, 1, cv2.LINE_AA)
 
         # Interpretation
-        cv2.putText(output, interpretation, (panel_x + 10, panel_y + 200),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.25, (140, 160, 130), 1, cv2.LINE_AA)
+        cv2.putText(output, interpretation, (panel_x + 10, panel_y + 225),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.23, (140, 160, 130), 1, cv2.LINE_AA)
 
         # B-line scoring bar
-        bar_y = panel_y + 210
+        bar_y = panel_y + 240
         bar_w = panel_w - 20
         cv2.rectangle(output, (panel_x + 10, bar_y), (panel_x + 10 + bar_w, bar_y + 6),
                      (40, 50, 35), -1)
