@@ -1,6 +1,34 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-23 - Sessao 20: SCAN Q Gating em FAST/LUNG/BLADDER/CARDIAC
+====================================================================
+
+### Resumo
+Implementacao de gating por qualidade de imagem (SCAN Q) em todos os
+plugins clinicos principais. Quando a qualidade da imagem esta abaixo
+de 35%, as deteccoes sao suspensas para evitar falsos positivos.
+
+### Melhorias Principais
+1. **FAST**: gating por SCAN Q - ignora deteccao de fluido em baixa qualidade
+2. **LUNG**: gating por SCAN Q - nao atualiza contagem de B-lines em baixa qualidade
+3. **BLADDER**: gating por SCAN Q - ignora deteccao de bexiga em baixa qualidade
+4. **CARDIAC**: gating por SCAN Q - nao atualiza historico de EF em baixa qualidade
+5. **Indicador visual**: todos os 4 plugins mostram "LOW QUALITY - ADJUST" quando qualidade < 35%
+
+### Arquivos Modificados
+- `src/ai_processor.py` - gating e indicadores visuais em FAST/LUNG/BLADDER/CARDIAC
+
+### Detalhes Tecnicos
+- Threshold de qualidade: 35% (configuravel via `quality_threshold`)
+- Quando `low_quality_mode = True`:
+  - FAST: `fluid_detected = False`
+  - LUNG: usa ultimo `severity_score` valido
+  - BLADDER: `contour_to_draw = None`
+  - CARDIAC: nao adiciona ao `cardiac_history`
+- Cores do alerta adaptadas por plugin (FAST=azul, LUNG=verde, BLADDER=roxo, CARDIAC=vermelho)
+
+====================================================================
 ## 2025-12-22 - Sessao 19: Commit Geral (datasets/checkpoints)
 ====================================================================
 

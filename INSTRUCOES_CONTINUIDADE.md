@@ -230,7 +230,7 @@ Arquivos de pesquisa em:
 ## ESTADO ATUAL DO PROJETO (ATUALIZAR A CADA SESSAO)
 ====================================================================
 
-### Ultima atualizacao: 2025-12-22 (Sessao 17)
+### Ultima atualizacao: 2025-12-23 (Sessao 20)
 
 - Registro central `plugin_registry.py` com nomes de pesos, formatos de label e modelos por plugin.
 - Unified dataset manager expandido (FAST/ANATOMY/BLADDER/LUNG) + novos sinteticos (bladder/lung/fast).
@@ -249,10 +249,15 @@ Arquivos de pesquisa em:
 - Repo inclui `datasets/unified/` e `training/checkpoints/` (grande, ~785MB).
 - Evitar `git add/commit/push` enquanto o treino em outro terminal estiver escrevendo artefatos grandes (risco de timeout/corrupcao).
 
+### Implementado na Sessao 20:
+- SCAN Q Gating em FAST/LUNG/BLADDER/CARDIAC (qualidade < 35% = deteccoes suspensas)
+- Indicador visual "LOW QUALITY - ADJUST" quando qualidade baixa
+
 ### Proximos passos recomendados (ordem sugerida)
-1. FAST: usar SCAN Q como gating para reduzir falso positivo + opcional auto-check de janela.
-2. LUNG/BLADDER/CARDIAC: refinar overlays e criterios de qualidade/estabilidade.
-3. Revisar mudancas locais de treino/datasets antes de commitar.
+1. FAST: opcional auto-check de janela (navegacao automatica entre views)
+2. Testar gating em cenarios reais para calibrar threshold (atualmente 35%)
+3. Voice controls para operacao hands-free (freeze, record, modos)
+4. Geracao de relatorios PDF com capturas e medicoes
 
 ====================================================================
 ## PROJETOS RELACIONADOS

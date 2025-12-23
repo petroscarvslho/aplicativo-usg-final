@@ -2505,6 +2505,13 @@ class AIProcessor:
         roi_coords = (roi_margin_x, roi_margin_y, w - roi_margin_x, h - roi_margin_y)
         tuned, gain_info = self._auto_gain_and_quality(gray, roi=roi_coords)
 
+        # ═══════════════════════════════════════
+        # GATING POR SCAN QUALITY (reduz falsos positivos)
+        # ═══════════════════════════════════════
+        scan_quality = gain_info.get('quality', 50.0) if gain_info else 50.0
+        quality_threshold = 35.0
+        low_quality_mode = scan_quality < quality_threshold
+
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(tuned)
         roi = enhanced[roi_margin_y:h-roi_margin_y, roi_margin_x:w-roi_margin_x]
@@ -2603,10 +2610,12 @@ class AIProcessor:
                     lv_center = (int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"]))
 
         # Tracking temporal para detectar ciclo cardiaco
-        if lv_area > 0:
-            self.cardiac_history.append(lv_area)
-        elif self.cardiac_history:
-            self.cardiac_history.append(self.cardiac_history[-1])
+        # Em baixa qualidade, nao atualizar historico
+        if not low_quality_mode:
+            if lv_area > 0:
+                self.cardiac_history.append(lv_area)
+            elif self.cardiac_history:
+                self.cardiac_history.append(self.cardiac_history[-1])
 
         # Calcular metricas a partir do historico
         if len(self.cardiac_history) >= 30:
@@ -2858,6 +2867,16 @@ class AIProcessor:
             cv2.putText(output, name, (legend_x + 45, cy),
                        cv2.FONT_HERSHEY_DUPLEX, 0.25, (120, 120, 140), 1, cv2.LINE_AA)
 
+        # Indicador de baixa qualidade
+        if low_quality_mode:
+            alert_y = 85
+            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
+                         (50, 40, 40), -1)
+            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
+                         (150, 100, 100), 2)
+            cv2.putText(output, "LOW QUALITY - ADJUST", (w//2 - 78, alert_y + 20),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.38, (220, 180, 180), 1, cv2.LINE_AA)
+
         self._draw_auto_gain_status(output, 20, 60, gain_info, color=(180, 130, 130))
 
         return output
@@ -2981,7 +3000,18 @@ class AIProcessor:
         history.append(best_score)
         avg_score = float(np.mean(history)) if history else 0.0
 
-        fluid_detected = avg_score >= 0.35
+        # ═══════════════════════════════════════
+        # GATING POR SCAN QUALITY (reduz falsos positivos)
+        # ═══════════════════════════════════════
+        scan_quality = gain_info.get('quality', 50.0) if gain_info else 50.0
+        quality_threshold = 35.0  # Qualidade minima para considerar deteccoes
+        low_quality_mode = scan_quality < quality_threshold
+
+        # So considera fluido se qualidade da imagem for aceitavel
+        if low_quality_mode:
+            fluid_detected = False  # Ignora deteccoes em imagem de baixa qualidade
+        else:
+            fluid_detected = avg_score >= 0.35
         if candidates:
             for cand in candidates[:2]:
                 if cand['score'] < 0.25:
@@ -3209,6 +3239,15 @@ class AIProcessor:
                          (0, 150, 255), 2)
             cv2.putText(output, "FLUID DETECTED", (w//2 - 65, alert_y + 20),
                        cv2.FONT_HERSHEY_DUPLEX, 0.45, (100, 200, 255), 1, cv2.LINE_AA)
+        elif low_quality_mode:
+            # Alerta de baixa qualidade - deteccoes suspensas
+            alert_y = 60
+            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
+                         (40, 40, 80), -1)
+            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
+                         (100, 100, 180), 2)
+            cv2.putText(output, "LOW QUALITY - ADJUST", (w//2 - 78, alert_y + 20),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.38, (180, 180, 220), 1, cv2.LINE_AA)
 
         self._draw_auto_gain_status(output, 20, 60, gain_info, color=(200, 190, 130))
 
@@ -4210,7 +4249,21 @@ class AIProcessor:
 
         avg_b_lines = np.mean(list(self.lung_b_line_history)) if self.lung_b_line_history else 0
         avg_density = np.mean(list(self.lung_b_line_density_history)) if self.lung_b_line_density_history else 0
-        severity_score = max(avg_b_lines, avg_density * 10)
+
+        # ═══════════════════════════════════════
+        # GATING POR SCAN QUALITY (reduz falsos positivos)
+        # ═══════════════════════════════════════
+        scan_quality = gain_info.get('quality', 50.0) if gain_info else 50.0
+        quality_threshold = 35.0
+        low_quality_mode = scan_quality < quality_threshold
+
+        if low_quality_mode:
+            # Baixa qualidade - nao atualizar contagem, usar ultimo valor valido
+            severity_score = getattr(self, '_last_lung_severity', 0)
+        else:
+            severity_score = max(avg_b_lines, avg_density * 10)
+            self._last_lung_severity = severity_score
+
         display_b_lines = int(np.clip(round(severity_score), 0, 10))
         self.b_line_count = display_b_lines
 
@@ -4346,6 +4399,16 @@ class AIProcessor:
             cv2.putText(output, name, (legend_x + 30, iy),
                        cv2.FONT_HERSHEY_DUPLEX, 0.25, color, 1, cv2.LINE_AA)
 
+        # Indicador de baixa qualidade
+        if low_quality_mode:
+            alert_y = 85
+            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
+                         (40, 50, 40), -1)
+            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
+                         (100, 150, 100), 2)
+            cv2.putText(output, "LOW QUALITY - ADJUST", (w//2 - 78, alert_y + 20),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.38, (180, 220, 180), 1, cv2.LINE_AA)
+
         self._draw_auto_gain_status(output, 20, 60, gain_info, color=(170, 200, 140))
 
         return output
@@ -4367,8 +4430,21 @@ class AIProcessor:
         # ═══════════════════════════════════════
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # ROI para bexiga (regiao central-inferior)
+        x0, y0 = int(w * 0.2), int(h * 0.35)
+        x1, y1 = int(w * 0.8), int(h * 0.9)
+        tuned, gain_info = self._auto_gain_and_quality(gray, roi=(x0, y0, x1, y1))
+
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
+        enhanced = clahe.apply(tuned)
+
+        # ═══════════════════════════════════════
+        # GATING POR SCAN QUALITY (reduz falsos positivos)
+        # ═══════════════════════════════════════
+        scan_quality = gain_info.get('quality', 50.0) if gain_info else 50.0
+        quality_threshold = 35.0
+        low_quality_mode = scan_quality < quality_threshold
 
         if model:
             try:
@@ -4496,10 +4572,14 @@ class AIProcessor:
                 solidity = area / hull_area if hull_area > 0 else 0.0
                 best_score = min(1.0, max(0.2, circularity + solidity) / 2.0)
 
-        quality_threshold = 0.45
+        detection_quality_threshold = 0.45
         self.bladder_quality = float(np.clip(best_score, 0.0, 1.0))
 
-        if contour_to_draw is not None and self.bladder_quality >= quality_threshold:
+        # Se qualidade de imagem estiver baixa, nao atualizar deteccao
+        if low_quality_mode:
+            contour_to_draw = None  # Ignora deteccao
+
+        if contour_to_draw is not None and self.bladder_quality >= detection_quality_threshold:
             area = cv2.contourArea(contour_to_draw)
 
             # Retangulo rotacionado para dimensoes
@@ -4755,6 +4835,16 @@ class AIProcessor:
         cv2.line(output, (legend_x + 10, legend_y + 42), (legend_x + 35, legend_y + 42), (100, 200, 255), 2)
         cv2.putText(output, "D2 (Height)", (legend_x + 40, legend_y + 46),
                    cv2.FONT_HERSHEY_DUPLEX, 0.25, (100, 200, 255), 1, cv2.LINE_AA)
+
+        # Indicador de baixa qualidade
+        if low_quality_mode:
+            alert_y = 85
+            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
+                         (50, 30, 50), -1)
+            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
+                         (150, 100, 150), 2)
+            cv2.putText(output, "LOW QUALITY - ADJUST", (w//2 - 78, alert_y + 20),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.38, (220, 180, 220), 1, cv2.LINE_AA)
 
         self._draw_auto_gain_status(output, 20, 60, gain_info, color=(200, 160, 220))
 
