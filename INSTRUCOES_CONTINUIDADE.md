@@ -56,6 +56,11 @@ Somente apos isso, continuar o desenvolvimento.
    - Atualizar `DIARIO.md` e `INSTRUCOES_CONTINUIDADE.md`
    - Commitar apenas o que foi feito nesta sessao
 
+### Status rapido (NEEDLE)
+- Dataset combinado inclui `brachial_real` (965 frames) + sintetico (total 5,965 amostras)
+- Kaggle Nerve ainda exige aceitar regras (API retorna 401)
+- Modelo VASST treinado em dados reais copiado para `models/vasst_needle.pt` (+ `.meta.json`)
+
 ====================================================================
 ## REGRA ABSOLUTA ANTES DE FECHAR QUALQUER CHAT / SESSAO
 ====================================================================

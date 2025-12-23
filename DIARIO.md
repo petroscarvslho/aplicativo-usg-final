@@ -704,3 +704,55 @@ Usuario escolheu abordagem HIBRIDA para datasets:
 2. Treinar modelos com `training/train_unified.py`
 3. Treinar YOLO com `training/train_yolo.py`
 4. Validar modelos no app e ajustar thresholds conforme necessario
+
+====================================================================
+## 2025-12-22 - Sessao 13: Fixes Treino NEEDLE + Export Manual
+====================================================================
+
+### Resumo
+- Ajustes no dataset manager para pular datasets vazios
+- Correcoes no treino (augment/resize grayscale) e resume PyTorch 2.6
+- Fix de serializacao JSON nas metricas
+- Treino NEEDLE feito com dataset sintetico (20 epocas)
+- Export manual de `models/vasst_needle.pt` + `.meta.json`
+- Kaggle download ainda pendente (competicao exige aceitar regras)
+
+### Resultados (NEEDLE sintetico)
+- Melhor Val Loss: ~0.0098 (epoca 18)
+- Treino em MPS, batch 32, 20 epocas
+
+### Arquivos Modificados
+- `datasets/unified_dataset_manager.py`
+- `training/train_unified.py`
+- `models/vasst_needle.pt`
+- `models/vasst_needle.meta.json`
+
+### Pendencias
+- Aceitar regras da competicao Kaggle "ultrasound-nerve-segmentation"
+- Rebaixar e reprocessar `kaggle_nerve` para NEEDLE real
+
+====================================================================
+## 2025-12-22 - Sessao 14: Dados Reais Brachial + Modelo VASST
+====================================================================
+
+### Resumo
+- Processamos o Sonosite (Brachial Plexus) no trainer e copiamos `processed/brachial_real` para o gerenciador unificado.
+- Ajustamos `combine_for_plugin` para padronizar canais ao combinar datasets.
+- Regeramos NEEDLE combinado (sintetico + brachial_real) e exportamos splits.
+- Treinamos VASST no dataset real (trainer) e copiamos `models/vasst_needle.pt` + `.meta.json` para este app.
+
+### Resultados (NEEDLE real - trainer)
+- Treino VASST (100 epocas, batch 32, device MPS)
+- Melhor Val Loss: ~0.0185 (erro ~4.7 px)
+- Modelo: `models/vasst_needle.pt` (state_dict) com `vasst_needle.meta.json`
+
+### Arquivos Modificados
+- `datasets/unified_dataset_manager.py` (padroniza dims ao combinar)
+- `datasets/unified/processed/needle/brachial_real/` (copiado do trainer)
+- `datasets/unified/exports/needle/` (regerado com 5,965 amostras)
+- `models/vasst_needle.pt` + `models/vasst_needle.meta.json` (novo modelo real)
+
+### Pendencias
+- Kaggle Nerve: ainda 401 (precisa aceitar regras no site)
+- Treinar demais plugins no unificado (NERVE/CARDIAC/FAST/etc.) se desejado
+- Decidir se commita ou ignora os artefatos grandes (.npy/.pt) neste repo

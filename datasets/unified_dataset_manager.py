@@ -999,6 +999,11 @@ def combine_for_plugin(plugin: str) -> Path:
             if labels is None:
                 continue
 
+            if images.ndim == 2:
+                images = np.expand_dims(images, axis=0)
+            if images.ndim == 3:
+                images = np.expand_dims(images, axis=-1)
+
             if images.shape[0] == 0 or images.ndim < 3:
                 print(f"   ⚠️ {dataset_dir.name}: imagens vazias/invalidas, pulando")
                 continue
