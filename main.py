@@ -36,6 +36,14 @@ import config
 from src.window_capture import WindowCapture
 from src.clip_recorder import ClipRecorder
 
+# Voice Control (opcional)
+try:
+    from src.voice_control import VoiceController
+    VOICE_AVAILABLE = True
+except ImportError:
+    VOICE_AVAILABLE = False
+    logger.warning("Voice control nao disponivel (falta SpeechRecognition/PyAudio)")
+
 
 # =============================================================================
 # CAPTURA EM THREAD SEPARADO (OTIMIZADA)
@@ -220,15 +228,13 @@ class AIThread(threading.Thread):
                             self._output_frame = frame
 
                     except Exception as e:
-                        print(f"AI Process Error: {e}")
+                        logger.error(f"AI Process Error: {e}")
                         # Em caso de erro, retornar frame original
                         with self._lock:
                             self._output_frame = frame
 
             except Exception as e:
-                print(f"AI Thread Error: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"AI Thread Error: {e}", exc_info=True)
 
             self._processing = False
 
@@ -352,6 +358,18 @@ class USGApp:
     MIN_ROI_SIZE = 20  # Tamanho minimo para ROI valida (pixels)
     MIN_ROI_GRID = 100  # Tamanho minimo para mostrar grid de tercos
 
+    # Constantes de zoom e navegacao
+    ZOOM_MIN = 0.5
+    ZOOM_MAX = 3.0
+    ZOOM_STEP = 0.1
+    PAN_STEP = 20  # Pixels por movimento de pan
+
+    # Constantes de calibracao de profundidade (Needle Pilot)
+    DEPTH_MIN_MM = 20
+    DEPTH_MAX_MM = 200
+    DEPTH_STEP_MM = 10
+    DEPTH_DEFAULT_MM = 100
+
     # Mapeamento centralizado: plugin_idx -> nome do modo AI
     # Indices correspondem a MODOS[1:] (excluindo B-MODE que é indice 0)
     AI_MODE_MAP = {
@@ -444,6 +462,18 @@ class USGApp:
         # Gravacao
         self.recorder = ClipRecorder(output_dir="captures", fps=30)
 
+        # Voice Control
+        self.voice_enabled = False
+        self.voice_controller = None
+        if VOICE_AVAILABLE:
+            try:
+                self.voice_controller = VoiceController(callback=self._on_voice_command)
+                self.voice_controller.start()
+                logger.info("Voice control inicializado")
+            except Exception as e:
+                logger.warning(f"Erro ao inicializar voice control: {e}")
+                self.voice_controller = None
+
         # Captura
         self.captura = CapturaThread()
         self.captura.start()
@@ -492,6 +522,10 @@ class USGApp:
         print("    < / ,   = Bloco anterior")
         print("    > / .   = Próximo bloco")
         print("    N       = Menu de bloqueios")
+        print("-" * 60)
+        print("  VOICE CONTROL (mãos livres):")
+        print("    M       = Ativar/Desativar microfone")
+        print("    Comandos: freeze, record, screenshot, next, confirm, reset")
         print("=" * 60 + "\n")
 
     def _criar_botoes(self):
@@ -612,7 +646,7 @@ class USGApp:
                     self.roi_drag_handle = None
                     self.source_mode = 0
                     self._invalidate_sidebar()
-                    print("Seleção cancelada")
+                    logger.info("Seleção de ROI cancelada")
                 return
 
             if not click_in_sidebar:
@@ -710,16 +744,16 @@ class USGApp:
                             self.roi_drag_start = None
                             self.roi_original = None
                             if self.process_roi:
-                                print(f"ROI ajustada: {self.process_roi[2]}x{self.process_roi[3]}")
+                                logger.debug(f"ROI ajustada: {self.process_roi[2]}x{self.process_roi[3]}")
                         elif self.roi_start:
                             self.roi_end = (img_x, img_y)
                             x1, y1 = self.roi_start
                             x2, y2 = self.roi_end
                             if abs(x2 - x1) > 30 and abs(y2 - y1) > 30:
                                 self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
-                                print(f"ROI selecionada: {self.process_roi[2]}x{self.process_roi[3]} - Pressione ENTER para confirmar")
+                                logger.info(f"ROI selecionada: {self.process_roi[2]}x{self.process_roi[3]} - ENTER para confirmar")
                             else:
-                                print("Arraste para criar uma área maior (min 30x30)")
+                                logger.debug("Arraste para criar area maior (min 30x30)")
                             self.roi_start = None
                             self.roi_end = None
                 else:
@@ -739,9 +773,9 @@ class USGApp:
                         x2, y2 = self.roi_end
                         if abs(x2 - x1) > 30 and abs(y2 - y1) > 30:
                             self.process_roi = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
-                            print(f"ROI selecionada: {self.process_roi[2]}x{self.process_roi[3]} - Pressione ENTER para confirmar")
+                            logger.info(f"ROI selecionada: {self.process_roi[2]}x{self.process_roi[3]} - ENTER para confirmar")
                         else:
-                            print("Arraste para criar uma área maior (min 30x30)")
+                            logger.debug("Arraste para criar area maior (min 30x30)")
                         self.roi_start = None
                         self.roi_end = None
             return
@@ -822,16 +856,16 @@ class USGApp:
         if mode == 0:  # B-MODE
             self.process_roi = None
             self.selecting_roi = False
-            print("B-MODE")
+            logger.info("Modo: B-MODE")
 
         elif mode == 1:  # IA ZONE
             # Manter ROI existente se houver, senao iniciar selecao
             if self.process_roi is None:
                 self.selecting_roi = True
-                print("IA ZONE - arraste na imagem para selecionar região")
+                logger.info("Modo: IA ZONE - arraste na imagem para selecionar regiao")
             else:
                 self.selecting_roi = False
-                print(f"IA ZONE - usando ROI existente")
+                logger.info("Modo: IA ZONE - usando ROI existente")
             # Carregar AI para que esteja pronta quando ROI for selecionada
             self._load_ai_if_needed()
 
@@ -839,7 +873,7 @@ class USGApp:
             self.process_roi = None
             self.selecting_roi = False
             self._load_ai_if_needed()
-            print("IA FULL - IA aplicada em toda a imagem")
+            logger.info("Modo: IA FULL - IA aplicada em toda a imagem")
 
     def _set_plugin(self, idx):
         """Define o plugin de IA selecionado"""
@@ -910,18 +944,18 @@ class USGApp:
             os.makedirs("captures", exist_ok=True)
             path = f"captures/usg_{time.strftime('%Y%m%d_%H%M%S')}.png"
             cv2.imwrite(path, self.frame_original, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-            print(f"Foto salva: {path}")
+            logger.info(f"Screenshot salvo: {path}")
 
     def _toggle_biplane(self):
         if not self.biplane_active:
             if self.frame_original is not None:
                 self.biplane_ref = self.frame_original.copy()
                 self.biplane_active = True
-                print("Biplane: ON (referencia capturada)")
+                logger.info("Biplane: ON (referencia capturada)")
         else:
             self.biplane_active = False
             self.biplane_ref = None
-            print("Biplane: OFF")
+            logger.info("Biplane: OFF")
 
     def _toggle_sidebar(self):
         self.show_sidebar = not self.show_sidebar
@@ -974,8 +1008,7 @@ class USGApp:
         try:
             success = self.ai.set_nerve_block(block_id)
             if success:
-                logger.info(f"Bloqueio: {block_name}")
-                print(f"NERVE TRACK: {block_name}")
+                logger.info(f"NERVE TRACK: {block_name}")
             self._invalidate_sidebar()
         except Exception as e:
             logger.error(f"Erro ao aplicar bloqueio: {e}")
@@ -1000,33 +1033,122 @@ class USGApp:
 
     def _fast_next_window(self):
         """Avanca para a proxima janela do FAST."""
-        if self.ai_processor:
-            order = self.ai_processor.fast_window_order
-            current_idx = order.index(self.ai_processor.fast_current_window)
+        if self.ai:
+            order = self.ai.fast_window_order
+            current_idx = order.index(self.ai.fast_current_window)
             next_idx = (current_idx + 1) % len(order)
             next_win = order[next_idx]
-            self.ai_processor._fast_navigate_to(next_win)
-            print(f"FAST: {next_win}")
+            self.ai._fast_navigate_to(next_win)
+            logger.info(f"FAST: {next_win}")
 
     def _fast_prev_window(self):
         """Volta para a janela anterior do FAST."""
-        if self.ai_processor:
-            order = self.ai_processor.fast_window_order
-            current_idx = order.index(self.ai_processor.fast_current_window)
+        if self.ai:
+            order = self.ai.fast_window_order
+            current_idx = order.index(self.ai.fast_current_window)
             prev_idx = (current_idx - 1) % len(order)
             prev_win = order[prev_idx]
-            self.ai_processor._fast_navigate_to(prev_win)
-            print(f"FAST: {prev_win}")
+            self.ai._fast_navigate_to(prev_win)
+            logger.info(f"FAST: {prev_win}")
 
     def _fast_confirm_window(self):
         """Confirma a janela atual do FAST manualmente."""
-        if self.ai_processor:
-            current = self.ai_processor.fast_current_window
-            if self.ai_processor.fast_windows[current]['status'] != 'checked':
-                self.ai_processor._fast_confirm_current_window()
-                print(f"FAST: {current} CONFIRMED")
+        if self.ai:
+            current = self.ai.fast_current_window
+            if self.ai.fast_windows[current]['status'] != 'checked':
+                self.ai._fast_confirm_current_window()
+                logger.info(f"FAST: {current} CONFIRMADO")
             else:
-                print(f"FAST: {current} already checked")
+                logger.debug(f"FAST: {current} ja verificado")
+
+    # =========================================================================
+    # LUNG PROTOCOL - Navegacao de Zonas (BLUE)
+    # =========================================================================
+
+    def _lung_next_zone(self):
+        """Avanca para a proxima zona do LUNG."""
+        if self.ai:
+            order = self.ai.lung_zone_order
+            current_idx = order.index(self.ai.lung_current_zone)
+            next_idx = (current_idx + 1) % len(order)
+            next_zone = order[next_idx]
+            self.ai._lung_navigate_to(next_zone)
+            logger.info(f"LUNG: {next_zone}")
+
+    def _lung_prev_zone(self):
+        """Volta para a zona anterior do LUNG."""
+        if self.ai:
+            order = self.ai.lung_zone_order
+            current_idx = order.index(self.ai.lung_current_zone)
+            prev_idx = (current_idx - 1) % len(order)
+            prev_zone = order[prev_idx]
+            self.ai._lung_navigate_to(prev_zone)
+            logger.info(f"LUNG: {prev_zone}")
+
+    def _lung_confirm_zone(self):
+        """Confirma a zona atual do LUNG manualmente."""
+        if self.ai:
+            current = self.ai.lung_current_zone
+            if self.ai.lung_zones[current]['status'] != 'checked':
+                self.ai._lung_confirm_current_zone()
+                logger.info(f"LUNG: {current} CONFIRMADO")
+            else:
+                logger.debug(f"LUNG: {current} ja verificado")
+
+    # =========================================================================
+    # VOICE CONTROL - Comandos por Voz
+    # =========================================================================
+
+    def _on_voice_command(self, command: str):
+        """Callback chamado quando um comando de voz e reconhecido."""
+        logger.info(f"Voice command: {command}")
+
+        if command == 'freeze':
+            self._toggle_pause()
+        elif command == 'record':
+            self._toggle_recording()
+        elif command == 'screenshot':
+            self._screenshot()
+        elif command == 'next':
+            # Contexto: FAST, NERVE ou LUNG
+            if self.plugin_idx == 4:  # FAST
+                self._fast_next_window()
+            elif self.plugin_idx == 1:  # NERVE
+                self._next_nerve_block()
+            elif self.plugin_idx == 8:  # LUNG
+                self._lung_next_zone()
+        elif command == 'previous':
+            if self.plugin_idx == 4:  # FAST
+                self._fast_prev_window()
+            elif self.plugin_idx == 1:  # NERVE
+                self._prev_nerve_block()
+            elif self.plugin_idx == 8:  # LUNG
+                self._lung_prev_zone()
+        elif command == 'confirm':
+            if self.plugin_idx == 4:  # FAST
+                self._fast_confirm_window()
+            elif self.plugin_idx == 8:  # LUNG
+                self._lung_confirm_zone()
+        elif command == 'reset':
+            if self.plugin_idx == 4 and self.ai:  # FAST
+                # Reset do exame FAST
+                for key in self.ai.fast_windows:
+                    self.ai.fast_windows[key] = {'status': 'pending', 'fluid': False, 'score': 0, 'time_spent': 0}
+                self.ai.fast_current_window = 'RUQ'
+                self.ai.fast_start_time = None
+            elif self.plugin_idx == 8 and self.ai:  # LUNG
+                self.ai._lung_reset_exam()
+                logger.info("LUNG: Reset")
+
+    def _toggle_voice(self):
+        """Ativa/desativa controle por voz."""
+        if self.voice_controller:
+            self.voice_enabled = self.voice_controller.toggle()
+            self._invalidate_sidebar()
+            status = "ATIVADO" if self.voice_enabled else "DESATIVADO"
+            logger.info(f"Voice Control: {status}")
+        else:
+            logger.warning("Voice Control: nao disponivel")
 
     def _toggle_overlays(self):
         self.show_overlays = not self.show_overlays
@@ -1053,30 +1175,30 @@ class USGApp:
             return 1920, 1080  # Fallback
 
     def _zoom_in(self):
-        self.zoom_level = min(3.0, self.zoom_level + 0.1)
-        print(f"Zoom: {self.zoom_level:.1f}x")
+        self.zoom_level = min(self.ZOOM_MAX, self.zoom_level + self.ZOOM_STEP)
+        logger.debug(f"Zoom: {self.zoom_level:.1f}x")
 
     def _zoom_out(self):
-        self.zoom_level = max(0.5, self.zoom_level - 0.1)
-        print(f"Zoom: {self.zoom_level:.1f}x")
+        self.zoom_level = max(self.ZOOM_MIN, self.zoom_level - self.ZOOM_STEP)
+        logger.debug(f"Zoom: {self.zoom_level:.1f}x")
 
     def _pan_up(self):
-        self.pan_y -= 20
+        self.pan_y -= self.PAN_STEP
 
     def _pan_down(self):
-        self.pan_y += 20
+        self.pan_y += self.PAN_STEP
 
     def _pan_left(self):
-        self.pan_x -= 20
+        self.pan_x -= self.PAN_STEP
 
     def _pan_right(self):
-        self.pan_x += 20
+        self.pan_x += self.PAN_STEP
 
     def _reset_view(self):
         self.zoom_level = 1.0
         self.pan_x = 0
         self.pan_y = 0
-        print("View resetada")
+        logger.debug("View resetada")
 
     def _update_transitions(self):
         """Atualiza animacoes de transicao"""
@@ -1133,7 +1255,7 @@ class USGApp:
             return
 
         self.process_roi = (rx, ry, rw, rh)
-        print(f"Preset ROI {preset}: {rw}x{rh} px")
+        logger.info(f"Preset ROI {preset}: {rw}x{rh} px")
 
     def _desenhar_sidebar(self, altura, pulse_phase=0):
         sidebar = np.zeros((altura, self.SIDEBAR_W, 3), dtype=np.uint8)
@@ -1288,6 +1410,26 @@ class USGApp:
             bar_w = int(80 * progress)
             cv2.rectangle(sidebar, (140, footer_y + 39), (220, footer_y + 47), (30, 30, 40), -1)
             cv2.rectangle(sidebar, (140, footer_y + 39), (140 + bar_w, footer_y + 47), (0, 0, 255), -1)
+
+        # Voice Control indicator
+        if self.voice_enabled and self.voice_controller:
+            vc_status = self.voice_controller.get_status()
+            vc_y = footer_y + 42 if not self.recording else footer_y + 56
+
+            if vc_status['listening']:
+                # Pulsando quando escutando
+                pulse = int(abs(np.sin(time.time() * 4)) * 55) + 200
+                mic_color = (0, pulse, 0)  # Verde pulsante
+                status_text = "MIC"
+            else:
+                mic_color = (0, 180, 220)  # Amarelo/laranja - processando
+                status_text = "MIC"
+
+            # Icone de microfone (circulo + barra)
+            cv2.circle(sidebar, (self.SIDEBAR_W - 50, vc_y - 3), 5, mic_color, -1)
+            cv2.rectangle(sidebar, (self.SIDEBAR_W - 52, vc_y - 3), (self.SIDEBAR_W - 48, vc_y + 3), mic_color, -1)
+            cv2.putText(sidebar, status_text, (self.SIDEBAR_W - 40, vc_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.3, mic_color, 1, cv2.LINE_AA)
 
         return sidebar
 
@@ -1870,8 +2012,11 @@ class USGApp:
                 # SIDEBAR COM CACHE (evita redesenho desnecessario)
                 # ══════════════════════════════════════════════════════════
                 if self.show_sidebar:
-                    # Redesenhar apenas se necessario
-                    if self._sidebar_dirty or last_sidebar is None or last_sidebar_height != target_h:
+                    # Redesenhar apenas se necessario (ou se voice/recording ativo para animacoes)
+                    needs_redraw = (self._sidebar_dirty or last_sidebar is None or
+                                   last_sidebar_height != target_h or
+                                   self.recording or self.voice_enabled)
+                    if needs_redraw:
                         sidebar = self._desenhar_sidebar(target_h, self.pulse_phase)
                         last_sidebar = sidebar.copy()
                         last_sidebar_height = target_h
@@ -1912,7 +2057,10 @@ class USGApp:
                             cv2.FONT_HERSHEY_DUPLEX, 0.4, (60, 60, 70), 1, cv2.LINE_AA)
 
                 if self.show_sidebar:
-                    if self._sidebar_dirty or last_sidebar is None or last_sidebar_height != h:
+                    needs_redraw = (self._sidebar_dirty or last_sidebar is None or
+                                   last_sidebar_height != h or
+                                   self.recording or self.voice_enabled)
+                    if needs_redraw:
                         sidebar = self._desenhar_sidebar(h, self.pulse_phase)
                         last_sidebar = sidebar.copy()
                         last_sidebar_height = h
@@ -1951,15 +2099,21 @@ class USGApp:
                     self.process_roi = None
                     self.source_mode = 0  # Voltar para B-MODE
                     self._invalidate_sidebar()
-                    print("Seleção cancelada")
+                    logger.info("Selecao de ROI cancelada")
                 else:
                     break
-            elif k == 13 or k == 10:  # ENTER - confirmar ROI
+            elif k == 13 or k == 10:  # ENTER
+                # Prioridade 1: Confirmar ROI em seleção
                 if self.selecting_roi and self.process_roi:
                     self.selecting_roi = False
                     self.roi_confirmed = True
                     self._load_ai_if_needed()
-                    print(f"ROI confirmada: {self.process_roi}")
+                    logger.info(f"ROI confirmada: {self.process_roi}")
+                # Prioridade 2: Fechar menu de bloqueios nervosos
+                elif self.nerve_block_show_menu:
+                    self._apply_nerve_block()
+                    self.nerve_block_show_menu = False
+                    self._invalidate_sidebar()
             # Presets de ROI (P=50%, O=75%, L=100%, K=Square)
             elif k == ord('p') and self.selecting_roi:
                 self._apply_roi_preset('50%')
@@ -2008,6 +2162,9 @@ class USGApp:
                 self.show_help = not self.show_help
             elif k == ord('x') or k == 122 or k == 201 or k == 144:
                 self._toggle_fullscreen()
+            elif k == ord('m'):
+                # Toggle voice control (microfone)
+                self._toggle_voice()
             # Plugins por numero (2-9, 0, V)
             elif ord('2') <= k <= ord('9'):
                 self._set_plugin(k - ord('2'))  # 2=NEEDLE(0), 3=NERVE(1), etc
@@ -2023,50 +2180,55 @@ class USGApp:
             # ═══════════════════════════════════════════════════════════════════════
             elif k == ord('['):
                 # Diminuir profundidade
-                current = self.ai_processor.calibration['depth_mm']
-                new_depth = max(20, current - 10)
-                self.ai_processor.set_ultrasound_depth(new_depth)
-                print(f"📐 Profundidade: {new_depth}mm")
+                if self.ai and hasattr(self.ai, 'calibration'):
+                    current = self.ai.calibration.get('depth_mm', self.DEPTH_DEFAULT_MM)
+                    new_depth = max(self.DEPTH_MIN_MM, current - self.DEPTH_STEP_MM)
+                    self.ai.set_ultrasound_depth(new_depth)
+                    logger.info(f"Profundidade: {new_depth}mm")
             elif k == ord(']'):
                 # Aumentar profundidade
-                current = self.ai_processor.calibration['depth_mm']
-                new_depth = min(200, current + 10)
-                self.ai_processor.set_ultrasound_depth(new_depth)
-                print(f"Profundidade: {new_depth}mm")
+                if self.ai and hasattr(self.ai, 'calibration'):
+                    current = self.ai.calibration.get('depth_mm', self.DEPTH_DEFAULT_MM)
+                    new_depth = min(self.DEPTH_MAX_MM, current + self.DEPTH_STEP_MM)
+                    self.ai.set_ultrasound_depth(new_depth)
+                    logger.info(f"Profundidade: {new_depth}mm")
 
             # ═══════════════════════════════════════════════════════════════════════
-            # NERVE TRACK v2.0 - Navegação de Bloqueios (<, >, n)
+            # NAVEGACAO DE PROTOCOLOS (<, >, n, SPACE)
+            # NERVE: bloqueios | FAST: janelas | LUNG: zonas
             # ═══════════════════════════════════════════════════════════════════════
             elif k == ord(',') or k == ord('<'):
-                # Bloqueio anterior (NERVE) ou Janela anterior (FAST)
+                # Anterior: bloqueio (NERVE), janela (FAST), zona (LUNG)
                 if self.plugin_idx == 1:  # NERVE
                     self._prev_nerve_block()
                 elif self.plugin_idx == 4:  # FAST
                     self._fast_prev_window()
+                elif self.plugin_idx == 8:  # LUNG
+                    self._lung_prev_zone()
             elif k == ord('.') or k == ord('>'):
-                # Próximo bloqueio (NERVE) ou Próxima janela (FAST)
+                # Próximo: bloqueio (NERVE), janela (FAST), zona (LUNG)
                 if self.plugin_idx == 1:  # NERVE
                     self._next_nerve_block()
                 elif self.plugin_idx == 4:  # FAST
                     self._fast_next_window()
+                elif self.plugin_idx == 8:  # LUNG
+                    self._lung_next_zone()
             elif k == ord('n'):
                 # Mostrar/esconder menu de bloqueios (quando NERVE ativo)
                 if self.plugin_idx == 1:  # NERVE
                     self._toggle_nerve_block_menu()
             elif k == ord(' '):  # SPACE
-                # Confirmar janela FAST manualmente
+                # Confirmar: janela (FAST) ou zona (LUNG)
                 if self.plugin_idx == 4:  # FAST
                     self._fast_confirm_window()
-            elif k == 13 or k == 10:  # ENTER
-                # Selecionar bloco atual e fechar menu
-                if self.nerve_block_show_menu:
-                    self._apply_nerve_block()
-                    self.nerve_block_show_menu = False
-                    self._invalidate_sidebar()
+                elif self.plugin_idx == 8:  # LUNG
+                    self._lung_confirm_zone()
 
         # Cleanup - parar todas as threads
         if self.recording:
             self.recorder.stop_recording()
+        if self.voice_controller:
+            self.voice_controller.stop()
         self.ai_thread.stop()
         self.captura.stop()
         cv2.destroyAllWindows()

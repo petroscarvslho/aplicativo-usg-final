@@ -1,6 +1,173 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
+## 2025-12-23 - Sessao 21 (cont.): NERVE Track Fallback Premium
+====================================================================
+
+### Resumo
+Refatoracao completa do fallback CV do NERVE Track para deteccao
+avancada de nervos sem modelo treinado.
+
+### Melhorias no NERVE Fallback
+
+1. **Deteccao por Contornos Adaptativos**:
+   - Substituido HoughCircles por threshold adaptativo
+   - Bilateral filter para preservar bordas
+   - Morfologia (close + open) para limpeza
+
+2. **Classificacao por Features**:
+   - Echogenicidade: nervos hipoecogenicos (40-120), arterias anecogenicas (<50)
+   - Circularidade: arterias circulares (>0.7), nervos ovalados (0.5-1.0)
+   - Aspect ratio: nervos alongados (1.0-3.0), fascia linear (>2.5)
+   - CSA (Cross-Sectional Area): nervos tipicos 3-80mm²
+
+3. **CSA Calculation**:
+   - Calculo automatico de area em mm² usando calibracao
+   - Exibido no label do nervo detectado
+
+4. **SCAN Q Gating**:
+   - Aviso visual quando qualidade < 35%
+   - Indicador de qualidade no painel
+
+5. **Visual Premium**:
+   - Overlay com transparencia variavel por tipo
+   - Elipse fitting para melhor visualizacao
+   - Painel com lista de estruturas detectadas
+   - Cores: NERVE (amarelo), ARTERY (vermelho), VEIN (azul), FASCIA (cinza)
+
+### Arquivos Modificados
+- `src/ai_processor.py` - _process_nerve_fallback() reescrito
+
+====================================================================
+## 2025-12-23 - Sessao 21: Refatoracao e Polimento do main.py
+====================================================================
+
+### Resumo
+Refatoracao completa do main.py para maior qualidade de codigo.
+Convertido de ~2233 para ~2244 linhas (constantes adicionadas).
+
+### Melhorias Realizadas
+
+1. **Correcao de referencias inconsistentes**:
+   - Substituido `self.ai_processor` por `self.ai` em 24 ocorrencias
+   - Manteve consistencia com a variavel de instancia correta
+
+2. **Conversao de print() para logging**:
+   - 25+ mensagens convertidas para usar `logger.info/debug/warning/error`
+   - Mantidos apenas os prints de ajuda (usuario) e erro critico
+   - Melhora rastreabilidade e permite filtrar por nivel
+
+3. **Correcao de handler duplicado de ENTER**:
+   - Havia dois handlers separados para ENTER (ROI e Nerve Menu)
+   - Consolidado em um unico handler com prioridades:
+     1. Confirmar ROI (se selecionando)
+     2. Fechar menu de bloqueios nervosos (se aberto)
+
+4. **Adicao de constantes para magic numbers**:
+   - `ZOOM_MIN = 0.5`, `ZOOM_MAX = 3.0`, `ZOOM_STEP = 0.1`
+   - `PAN_STEP = 20`
+   - `DEPTH_MIN_MM = 20`, `DEPTH_MAX_MM = 200`, `DEPTH_STEP_MM = 10`
+   - `DEPTH_DEFAULT_MM = 100`
+
+5. **Protecao adicional de null checks**:
+   - Adicionado `hasattr(self.ai, 'calibration')` antes de acessar
+   - Usado `.get()` com valor default para calibration['depth_mm']
+
+### Beneficios
+- Codigo mais limpo e consistente
+- Logging estruturado para debug
+- Constantes facilitam manutencao
+- Eliminado bug do handler ENTER duplicado
+- Melhor tratamento de erros
+
+### Arquivos Modificados
+- `main.py` - refatoracao completa
+- `DIARIO.md` - documentacao da sessao
+
+====================================================================
+## 2025-12-23 - Sessao 20 (cont.): Voice Control - Maos Livres
+====================================================================
+
+### Resumo
+Implementacao de controle por voz para operacao hands-free durante exames.
+Usa Google Speech Recognition (requer internet) com comandos em portugues e ingles.
+
+### Voice Control Implementado
+1. **Modulo voice_control.py**: sistema completo de reconhecimento de voz
+   - Thread separada para escuta continua (nao bloqueia UI)
+   - Comandos em PT-BR e EN (freeze/congelar, record/gravar, etc.)
+   - Cooldown de 1.5s entre comandos repetidos
+   - Feedback sonoro (sons do sistema macOS)
+
+2. **Comandos Suportados**:
+   - `freeze/congelar/pausar` - pausa/resume imagem
+   - `record/gravar` - inicia/para gravacao
+   - `screenshot/foto/captura` - tira screenshot
+   - `next/proximo` - proxima janela FAST ou proximo bloco NERVE
+   - `previous/anterior` - anterior
+   - `confirm/confirmar/ok` - confirma janela FAST
+   - `reset/reiniciar` - reinicia exame FAST
+
+3. **Indicador Visual**:
+   - Icone de microfone na sidebar (canto inferior direito)
+   - Verde pulsante = escutando
+   - Amarelo = processando
+
+4. **Atalho**: Tecla `M` ativa/desativa microfone
+
+### Arquivos Modificados
+- `src/voice_control.py` - NOVO: modulo de reconhecimento de voz
+- `main.py` - integracao, callback, toggle, indicador visual, cleanup
+
+### Dependencias
+- `SpeechRecognition` - pip install SpeechRecognition
+- `PyAudio` - pip install pyaudio (requer portaudio: brew install portaudio)
+
+====================================================================
+## 2025-12-23 - Sessao 20 (cont.): LUNG/BLADDER/CARDIAC Melhorias
+====================================================================
+
+### Resumo
+Melhorias nos plugins clinicos: navegacao por zonas no LUNG, guias visuais
+no BLADDER, e deteccao automatica de view no CARDIAC.
+
+### LUNG - Protocolo BLUE (8 zonas)
+1. **Navegacao por zonas**: Sistema similar ao FAST com 8 zonas pulmonares
+   - R1-R4 (Right): Upper Ant, Lower Ant, Lateral, Posterior
+   - L1-L4 (Left): Upper Ant, Lower Ant, Lateral, Posterior
+2. **Painel de zonas**: Mostra status de cada zona (pendente, scanning, checked)
+3. **Perfil por zona**: A-profile (normal) ou B-profile (B-lines >= 3)
+4. **Timer por zona**: Mostra tempo de scan em cada zona
+5. **Feedback sonoro**: Pop ao confirmar zona, Glass ao completar exame
+6. **Banner EXAM COMPLETE**: Resume contagem A-profile vs B-profile
+
+### BLADDER - Guia de Posicionamento
+1. **Dual-view hint**: Quando apenas uma view capturada, mostra hint para rodar probe
+   - "Rotate probe for SAGITTAL view" (quando trans capturada)
+   - "Rotate probe for TRANSVERSE view" (quando sag capturada)
+2. **Icone de rotacao**: Animado para guiar movimento do probe
+3. **DUAL-VIEW ACTIVE**: Indicador verde quando ambas views validas
+
+### CARDIAC - Deteccao de View
+1. **View detection**: Automatico baseado no aspect ratio do LV
+   - A4C: Apical 4-Chamber (aspect > 1.4)
+   - PLAX: Parasternal Long Axis (aspect < 0.75)
+   - PSAX: Parasternal Short Axis (aspect ~1.0)
+   - A2C: Apical 2-Chamber (casos intermediarios)
+2. **Indicador de view**: Painel com nome da view e confianca (%)
+3. **Suavizacao temporal**: Evita trocas rapidas de view
+
+### Atalhos (LUNG igual FAST)
+- `<` ou `,` - zona anterior
+- `>` ou `.` - proxima zona
+- `SPACE` - confirmar zona
+- Comandos de voz: next, previous, confirm, reset
+
+### Arquivos Modificados
+- `src/ai_processor.py` - LUNG zones, BLADDER guide, CARDIAC view
+- `main.py` - Navegacao LUNG, voice commands para LUNG
+
+====================================================================
 ## 2025-12-23 - Sessao 20: SCAN Q Gating + FAST Auto-Navegacao Premium
 ====================================================================
 

@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any, Deque
 from collections import deque
 import config
+from src.ui_utils import (
+    Theme, draw_panel, draw_status_indicator, draw_progress_bar,
+    draw_labeled_value, draw_structure_list, draw_scan_quality,
+    draw_warning_banner, draw_legend, FONT, FONT_SCALE_LABEL, FONT_SCALE_SMALL
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KALMAN FILTER para Needle Tracking (Fase 1 - Otimização Premium)
@@ -426,6 +431,9 @@ class AIProcessor:
         self.cardiac_phase = 'diastole'
         self.cardiac_cycle_frames = []
         self.cardiac_last_peak = 0
+        self.cardiac_view = 'A4C'  # A4C, PLAX, PSAX, A2C
+        self.cardiac_view_confidence = 0.0
+        self.cardiac_lv_aspect_ratio = 1.0
 
         # FAST Protocol
         self.fast_windows = {
@@ -477,6 +485,34 @@ class AIProcessor:
         self.lung_consolidation = False
         self.lung_pleura_history = deque(maxlen=12)
         self.lung_b_line_density_history = deque(maxlen=30)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # LUNG ZONES - Protocolo BLUE (8 zonas)
+        # ═══════════════════════════════════════════════════════════════════════
+        self.lung_zone_order = ['R1', 'R2', 'R3', 'R4', 'L1', 'L2', 'L3', 'L4']
+        self.lung_zone_names = {
+            'R1': 'Right Upper Ant',
+            'R2': 'Right Lower Ant',
+            'R3': 'Right Lateral',
+            'R4': 'Right Posterior',
+            'L1': 'Left Upper Ant',
+            'L2': 'Left Lower Ant',
+            'L3': 'Left Lateral',
+            'L4': 'Left Posterior',
+        }
+        self.lung_zones = {zone: {
+            'status': 'pending',  # pending, scanning, checked
+            'b_lines': 0,
+            'a_lines': False,
+            'sliding': True,
+            'profile': 'A',  # A or B
+            'time_spent': 0.0,
+        } for zone in self.lung_zone_order}
+        self.lung_current_zone = 'R1'
+        self.lung_zone_start_time = None
+        self.lung_zone_min_scan_time = 2.0  # Segundos mínimos por zona
+        self.lung_exam_complete = False
+        self.lung_exam_start_time = None
 
         # Bladder AI
         self.bladder_history = deque(maxlen=30)
@@ -2218,7 +2254,10 @@ class AIProcessor:
         return output
 
     def _process_nerve_fallback(self, frame):
-        """Fallback: Detecção básica de nervos por CV quando NERVE TRACK v2.0 não disponível."""
+        """
+        Fallback PREMIUM: Deteccao avancada de nervos por CV.
+        Usa contornos adaptativos, elipses, echogenicidade e CSA.
+        """
         output = frame.copy()
         h, w = frame.shape[:2]
         structures = []
@@ -2227,90 +2266,206 @@ class AIProcessor:
         # ATLAS EDUCACIONAL - Usar quando modelo não está treinado
         # ═══════════════════════════════════════════════════════════════════════
         if self.educational_atlas is not None:
-            # Atualizar bloco no atlas se definido
             if self.nerve_block_id:
                 self.educational_atlas.set_block(self.nerve_block_id)
-
-            # Atualizar animação
             self.educational_atlas.update_animation()
-
-            # Renderizar atlas educacional
             output = self.educational_atlas.render_atlas(output, self.atlas_mode)
             return output
 
         # ═══════════════════════════════════════════════════════════════════════
-        # Deteccao por CV (circulos) - Fallback básico
+        # SCAN Q Gating - Verificar qualidade antes de processar
+        # ═══════════════════════════════════════════════════════════════════════
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gain_roi = (int(w * 0.1), int(h * 0.1), int(w * 0.9), int(h * 0.9))
         tuned, gain_info = self._auto_gain_and_quality(gray, roi=gain_roi)
+        scan_quality = gain_info.get('quality', 0.5)
 
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        # Se qualidade baixa, mostrar aviso
+        if scan_quality < 0.35:
+            cv2.putText(output, "LOW QUALITY - ADJUST PROBE", (w//2 - 120, 30),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # DETECCAO AVANCADA POR CONTORNOS + ELIPSES
+        # ═══════════════════════════════════════════════════════════════════════
+        # CLAHE para melhor contraste
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
         enhanced = clahe.apply(tuned)
-        enhanced = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
-        now = time.time()
-        best_score = 0.0
+        # Bilateral filter preserva bordas
+        enhanced = cv2.bilateralFilter(enhanced, 9, 75, 75)
 
-        circles = cv2.HoughCircles(
-            enhanced, cv2.HOUGH_GRADIENT, 1, 30,
-            param1=50, param2=30, minRadius=8, maxRadius=100
+        # Threshold adaptativo para encontrar estruturas hipoecogenicas
+        thresh = cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 21, 8
         )
 
-        if circles is not None:
-            circles = np.uint16(np.around(circles))
-            for x, y, r in circles[0, :6]:
-                area = np.pi * r * r
-                diameter_mm = r * 2 * self.calibration.get('mm_per_pixel', 0.3)
+        # Morfologia para limpar
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
 
-                # Classificar por tamanho e ecogenicidade
-                roi = gray[max(0,y-r):y+r, max(0,x-r):x+r]
-                if roi.size > 0:
-                    mean_intensity = np.mean(roi)
+        # Encontrar contornos
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                    if r > 30:
-                        name, color = "NERVE", (0, 255, 255)
-                    elif mean_intensity < 60:
-                        name, color = "ARTERY", (0, 0, 255)
-                    else:
-                        name, color = "VEIN", (255, 100, 100)
+        mm_per_pixel = self.calibration.get('mm_per_pixel', 0.1)
 
-                    # Desenhar
-                    cv2.circle(output, (x, y), r+2, (color[0]//2, color[1]//2, color[2]//2), 2)
-                    cv2.circle(output, (x, y), r, color, 1)
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 200 or area > 50000:  # Filtrar por area
+                continue
 
-                    # Label
-                    cv2.putText(output, name, (x - 20, y - r - 5),
-                               cv2.FONT_HERSHEY_DUPLEX, 0.35, color, 1, cv2.LINE_AA)
-                    cv2.putText(output, f"{diameter_mm:.1f}mm", (x - 15, y + r + 15),
-                               cv2.FONT_HERSHEY_DUPLEX, 0.3, (150, 150, 180), 1, cv2.LINE_AA)
+            # Calcular propriedades
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter == 0:
+                continue
 
-                    structures.append({
-                        'type': name,
-                        'center': (int(x), int(y)),
-                        'diameter': diameter_mm,
-                        'color': color
-                    })
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
 
-        # Painel simples
-        panel_w = 140
+            # Bounding rect e centro
+            x, y, bw, bh = cv2.boundingRect(contour)
+            M = cv2.moments(contour)
+            if M['m00'] > 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+            else:
+                cx, cy = x + bw // 2, y + bh // 2
+
+            # Aspect ratio
+            aspect_ratio = max(bw, bh) / max(min(bw, bh), 1)
+
+            # Calcular CSA (Cross-Sectional Area) em mm²
+            csa_mm2 = area * (mm_per_pixel ** 2)
+
+            # Echogenicidade da região
+            mask = np.zeros(gray.shape, dtype=np.uint8)
+            cv2.drawContours(mask, [contour], -1, 255, -1)
+            mean_echo = cv2.mean(gray, mask=mask)[0]
+
+            # ═══════════════════════════════════════════════════════════════
+            # CLASSIFICACAO POR FEATURES
+            # ═══════════════════════════════════════════════════════════════
+            # Nervos: hipoecogenicos, forma ovalada, CSA tipico 5-50mm²
+            # Arterias: anecogenicas (muito escuro), circulares, pulsateis
+            # Veias: anecogenicas, compressiveis, forma irregular
+
+            structure_type = "UNKNOWN"
+            color = (128, 128, 128)
+            confidence = 0.5
+
+            # Nervo: echogenicidade media-baixa, forma ovalada
+            if 40 < mean_echo < 120 and circularity > 0.5 and 1.0 < aspect_ratio < 3.0:
+                if 3 < csa_mm2 < 80:  # CSA tipico de nervos perifericos
+                    structure_type = "NERVE"
+                    color = (0, 255, 255)  # Amarelo
+                    confidence = min(0.95, 0.6 + circularity * 0.3)
+
+            # Arteria: muito escuro (anecogenico), circular
+            elif mean_echo < 50 and circularity > 0.7:
+                structure_type = "ARTERY"
+                color = (0, 0, 255)  # Vermelho
+                confidence = min(0.9, 0.5 + circularity * 0.4)
+
+            # Veia: escuro, menos circular que arteria
+            elif mean_echo < 60 and 0.4 < circularity < 0.8:
+                structure_type = "VEIN"
+                color = (255, 100, 100)  # Azul
+                confidence = 0.6
+
+            # Fascia: hiperecogenico (brilhante), linear
+            elif mean_echo > 140 and aspect_ratio > 2.5:
+                structure_type = "FASCIA"
+                color = (200, 200, 200)  # Cinza claro
+                confidence = 0.5
+
+            # Pular estruturas desconhecidas
+            if structure_type == "UNKNOWN":
+                continue
+
+            # ═══════════════════════════════════════════════════════════════
+            # DESENHAR ESTRUTURA
+            # ═══════════════════════════════════════════════════════════════
+            # Overlay com transparencia
+            overlay = output.copy()
+            cv2.drawContours(overlay, [contour], -1, color, -1)
+            alpha = 0.25 if structure_type != "NERVE" else 0.35
+            cv2.addWeighted(overlay, alpha, output, 1 - alpha, 0, output)
+
+            # Contorno
+            thickness = 2 if structure_type == "NERVE" else 1
+            cv2.drawContours(output, [contour], -1, color, thickness)
+
+            # Elipse se possivel (melhor visualizacao)
+            if len(contour) >= 5:
+                try:
+                    ellipse = cv2.fitEllipse(contour)
+                    cv2.ellipse(output, ellipse, color, 1)
+                except:
+                    pass
+
+            # Label com CSA
+            label = f"{structure_type}"
+            if structure_type == "NERVE":
+                label += f" {csa_mm2:.1f}mm²"
+
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.35, 1)
+            label_y = cy - 10 if cy > 30 else cy + bh + 15
+            cv2.rectangle(output, (cx - tw//2 - 2, label_y - th - 2),
+                         (cx + tw//2 + 2, label_y + 2), (0, 0, 0), -1)
+            cv2.putText(output, label, (cx - tw//2, label_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.35, color, 1, cv2.LINE_AA)
+
+            structures.append({
+                'type': structure_type,
+                'center': (cx, cy),
+                'contour': contour,
+                'csa_mm2': csa_mm2,
+                'confidence': confidence,
+                'echogenicity': mean_echo,
+                'circularity': circularity,
+                'color': color
+            })
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # PAINEL DE INFORMACOES PREMIUM (usando UI Utils)
+        # ═══════════════════════════════════════════════════════════════════════
+        nerve_count = sum(1 for s in structures if s['type'] == 'NERVE')
+        vessel_count = sum(1 for s in structures if s['type'] in ('ARTERY', 'VEIN'))
+
+        panel_w = 160
         panel_x = w - panel_w - 10
         panel_y = 10
-        panel_h = 80
+        struct_height = min(len(structures), 4) * 20
+        panel_h = 95 + struct_height
 
-        overlay = output.copy()
-        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (30, 30, 20), -1)
-        cv2.addWeighted(overlay, 0.85, output, 0.15, 0, output)
-        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (0, 200, 200), 1)
+        # Painel com header
+        content_y = draw_panel(output, panel_x, panel_y, panel_w, panel_h,
+                               title="NERVE TRACK", version="CV")
 
-        cv2.putText(output, "NERVE TRACK", (panel_x + 10, panel_y + 22),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
-        cv2.putText(output, "(Modo Basico)", (panel_x + 10, panel_y + 40),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (150, 150, 150), 1, cv2.LINE_AA)
+        # Bloqueio selecionado
+        if self.nerve_block_id:
+            block_name = self.nerve_block_id.replace('_', ' ').title()[:18]
+            cv2.putText(output, block_name, (panel_x + 8, content_y),
+                       FONT, FONT_SCALE_SMALL, Theme.TEXT_SECONDARY, 1, cv2.LINE_AA)
+            content_y += 15
 
-        nerve_count = sum(1 for s in structures if s['type'] == 'NERVE')
-        vessel_count = len(structures) - nerve_count
-        cv2.putText(output, f"N:{nerve_count} V:{vessel_count}", (panel_x + 10, panel_y + 60),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.35, (120, 120, 140), 1, cv2.LINE_AA)
+        # Contagem com indicadores
+        draw_status_indicator(output, panel_x + 5, content_y + 5, f"Nervos: {nerve_count}",
+                             active=nerve_count > 0, color=Theme.NERVE)
+        content_y += 18
+
+        draw_status_indicator(output, panel_x + 5, content_y + 5, f"Vasos: {vessel_count}",
+                             active=vessel_count > 0, color=Theme.VEIN)
+        content_y += 18
+
+        # SCAN Q
+        draw_scan_quality(output, panel_x + 8, content_y + 5, scan_quality)
+        content_y += 18
+
+        # Lista de estruturas
+        if structures:
+            draw_structure_list(output, panel_x + 5, content_y, structures, max_items=4)
 
         return output
 
@@ -2626,6 +2781,41 @@ class AIProcessor:
                 if M["m00"] > 0:
                     lv_center = (int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"]))
 
+                # ═══ VIEW DETECTION (baseado no aspect ratio do LV) ═══
+                rect = cv2.minAreaRect(best_contour)
+                (cx, cy), (lv_w, lv_h), angle = rect
+                # Garantir que lv_w é a largura (maior dimensao horizontal)
+                if lv_h > lv_w:
+                    lv_w, lv_h = lv_h, lv_w
+
+                self.cardiac_lv_aspect_ratio = lv_w / max(lv_h, 1)
+
+                # Classificar view baseado no aspect ratio e posição
+                # A4C: LV tipicamente oval horizontal (aspect > 1.3)
+                # PLAX: LV mais alongado verticalmente (aspect < 0.8)
+                # PSAX: LV circular (aspect ~1.0)
+                # A2C: Similar a A4C mas LV mais centrado
+                if self.cardiac_lv_aspect_ratio > 1.4:
+                    new_view = 'A4C'
+                    conf = min((self.cardiac_lv_aspect_ratio - 1.4) / 0.6, 1.0)
+                elif self.cardiac_lv_aspect_ratio < 0.75:
+                    new_view = 'PLAX'
+                    conf = min((0.75 - self.cardiac_lv_aspect_ratio) / 0.25, 1.0)
+                elif 0.85 <= self.cardiac_lv_aspect_ratio <= 1.15:
+                    new_view = 'PSAX'
+                    conf = 1.0 - abs(self.cardiac_lv_aspect_ratio - 1.0) / 0.15
+                else:
+                    new_view = 'A2C'  # Casos intermediários
+                    conf = 0.5
+
+                # Suavização temporal da view
+                if new_view == self.cardiac_view:
+                    self.cardiac_view_confidence = 0.9 * self.cardiac_view_confidence + 0.1 * conf
+                else:
+                    if conf > self.cardiac_view_confidence + 0.2:
+                        self.cardiac_view = new_view
+                        self.cardiac_view_confidence = conf
+
         # Tracking temporal para detectar ciclo cardiaco
         # Em baixa qualidade, nao atualizar historico
         if not low_quality_mode:
@@ -2723,99 +2913,73 @@ class AIProcessor:
         panel_y = 10
         panel_h = 250
 
-        overlay = output.copy()
-        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
-                     (30, 25, 25), -1)
-        cv2.addWeighted(overlay, 0.88, output, 0.12, 0, output)
-        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
-                     (180, 100, 100), 1)
+        # Painel com header (tema vermelho para cardiac)
+        cardiac_border = (180, 100, 100)
+        content_y = draw_panel(output, panel_x, panel_y, panel_w, panel_h,
+                               title="CARDIAC AI",
+                               border_color=cardiac_border,
+                               title_color=(255, 150, 150))
 
-        # Titulo
-        cv2.putText(output, "CARDIAC AI", (panel_x + 10, panel_y + 22),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 150, 150), 1, cv2.LINE_AA)
-
-        # Indicador de fase
+        # Indicador de fase (canto superior direito)
         phase_text = "DIASTOLE" if self.cardiac_phase == 'diastole' else "SYSTOLE"
         phase_col = (100, 150, 255) if self.cardiac_phase == 'diastole' else (100, 255, 150)
-        cv2.circle(output, (panel_x + panel_w - 20, panel_y + 18), 5, phase_col, -1)
+        cv2.circle(output, (panel_x + panel_w - 15, panel_y + 13), 5, phase_col, -1)
 
         # ═══ EF ═══
-        ef_y = panel_y + 50
-        cv2.putText(output, "EF", (panel_x + 10, ef_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.35, (120, 120, 140), 1, cv2.LINE_AA)
-
         ef_val = self.cardiac_ef if self.cardiac_ef else 55
 
         # Cor baseada no EF
         if ef_val >= 55:
-            ef_color = (100, 255, 100)
+            ef_color = Theme.STATUS_OK
             ef_status = "NORMAL"
         elif ef_val >= 40:
-            ef_color = (0, 255, 255)
+            ef_color = Theme.STATUS_WARNING
             ef_status = "LEVE"
         elif ef_val >= 30:
             ef_color = (0, 165, 255)
             ef_status = "MODERADO"
         else:
-            ef_color = (0, 0, 255)
+            ef_color = Theme.STATUS_ERROR
             ef_status = "GRAVE"
 
-        cv2.putText(output, f"{int(ef_val)}%", (panel_x + 50, ef_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.7, ef_color, 1, cv2.LINE_AA)
-        cv2.putText(output, ef_status, (panel_x + 110, ef_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, ef_color, 1, cv2.LINE_AA)
+        draw_labeled_value(output, panel_x + 10, content_y, "EF", f"{int(ef_val)}%", "",
+                          label_color=Theme.TEXT_SECONDARY, value_color=ef_color, label_width=35)
+        cv2.putText(output, ef_status, (panel_x + 100, content_y),
+                   FONT, FONT_SCALE_SMALL, ef_color, 1, cv2.LINE_AA)
+        content_y += 12
 
         # Barra EF
-        bar_y = ef_y + 8
-        bar_w = panel_w - 20
-        cv2.rectangle(output, (panel_x + 10, bar_y), (panel_x + 10 + bar_w, bar_y + 6), (40, 40, 50), -1)
-        fill_w = int(bar_w * min(ef_val, 80) / 80)
-        cv2.rectangle(output, (panel_x + 10, bar_y), (panel_x + 10 + fill_w, bar_y + 6), ef_color, -1)
-
-        # Marcadores 30% e 55%
-        for mark_val in [30, 55]:
-            mx = panel_x + 10 + int(bar_w * mark_val / 80)
-            cv2.line(output, (mx, bar_y), (mx, bar_y + 6), (80, 80, 100), 1)
+        draw_progress_bar(output, panel_x + 10, content_y, panel_w - 20, 6,
+                         ef_val, max_value=80, color=ef_color, show_markers=[30, 55])
+        content_y += 18
 
         # ═══ VOLUMES ═══
-        vol_y = panel_y + 90
-        cv2.putText(output, "VOLUMES", (panel_x + 10, vol_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 100, 120), 1, cv2.LINE_AA)
+        cv2.putText(output, "VOLUMES", (panel_x + 10, content_y),
+                   FONT, FONT_SCALE_SMALL, Theme.TEXT_MUTED, 1, cv2.LINE_AA)
+        content_y += 18
 
         edv_val = self.cardiac_edv if self.cardiac_edv else 120
         esv_val = self.cardiac_esv if self.cardiac_esv else 50
 
-        cv2.putText(output, "EDV", (panel_x + 10, vol_y + 20),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (140, 140, 160), 1, cv2.LINE_AA)
-        cv2.putText(output, f"{int(edv_val)}ml", (panel_x + 50, vol_y + 20),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (180, 180, 200), 1, cv2.LINE_AA)
-
-        cv2.putText(output, "ESV", (panel_x + 95, vol_y + 20),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (140, 140, 160), 1, cv2.LINE_AA)
-        cv2.putText(output, f"{int(esv_val)}ml", (panel_x + 130, vol_y + 20),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.4, (180, 180, 200), 1, cv2.LINE_AA)
+        draw_labeled_value(output, panel_x + 10, content_y, "EDV", f"{int(edv_val)}", "ml",
+                          label_color=Theme.TEXT_SECONDARY, value_color=Theme.TEXT_PRIMARY, label_width=35)
+        draw_labeled_value(output, panel_x + 85, content_y, "ESV", f"{int(esv_val)}", "ml",
+                          label_color=Theme.TEXT_SECONDARY, value_color=Theme.TEXT_PRIMARY, label_width=35)
+        content_y += 22
 
         # ═══ GLS ═══
-        gls_y = panel_y + 135
-        cv2.putText(output, "GLS", (panel_x + 10, gls_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.35, (120, 120, 140), 1, cv2.LINE_AA)
-
         gls_val = self.cardiac_gls if self.cardiac_gls else -18
-        gls_color = (100, 255, 100) if gls_val <= -16 else (0, 200, 255) if gls_val <= -12 else (0, 100, 255)
-        cv2.putText(output, f"{gls_val:.1f}%", (panel_x + 50, gls_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.5, gls_color, 1, cv2.LINE_AA)
+        gls_color = Theme.STATUS_OK if gls_val <= -16 else Theme.STATUS_WARNING if gls_val <= -12 else Theme.STATUS_ERROR
+        draw_labeled_value(output, panel_x + 10, content_y, "GLS", f"{gls_val:.1f}%", "",
+                          label_color=Theme.TEXT_SECONDARY, value_color=gls_color, label_width=35)
+        content_y += 22
 
         # ═══ HR ═══
-        hr_y = panel_y + 165
-        cv2.putText(output, "HR", (panel_x + 10, hr_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.35, (120, 120, 140), 1, cv2.LINE_AA)
-
         hr_val = self.cardiac_hr if self.cardiac_hr else 72
-        hr_color = (100, 255, 100) if 60 <= hr_val <= 100 else (0, 200, 255)
-        cv2.putText(output, f"{hr_val}", (panel_x + 50, hr_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.5, hr_color, 1, cv2.LINE_AA)
-        cv2.putText(output, "bpm", (panel_x + 95, hr_y),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 100, 120), 1, cv2.LINE_AA)
+        hr_color = Theme.STATUS_OK if 60 <= hr_val <= 100 else Theme.STATUS_WARNING
+        draw_labeled_value(output, panel_x + 10, content_y, "HR", f"{hr_val}", "bpm",
+                          label_color=Theme.TEXT_SECONDARY, value_color=hr_color, label_width=35)
+        content_y += 18
 
         # ═══ MINI ECG WAVEFORM ═══
         ecg_y = panel_y + 190
@@ -2851,6 +3015,43 @@ class AIProcessor:
                    cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 180, 180), 1, cv2.LINE_AA)
         cv2.putText(output, phase_text, (95, 33),
                    cv2.FONT_HERSHEY_DUPLEX, 0.35, phase_col, 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════
+        # VIEW INDICATOR (A4C, PLAX, PSAX, A2C)
+        # ═══════════════════════════════════════
+        view_y = 52
+        view_w = 100
+        view_h = 28
+
+        overlay = output.copy()
+        cv2.rectangle(overlay, (10, view_y), (10 + view_w, view_y + view_h),
+                     (40, 35, 35), -1)
+        cv2.addWeighted(overlay, 0.9, output, 0.1, 0, output)
+        cv2.rectangle(output, (10, view_y), (10 + view_w, view_y + view_h),
+                     (120, 100, 100), 1)
+
+        # View name e descrição
+        view_names = {
+            'A4C': ('A4C', 'Apical 4-Ch'),
+            'A2C': ('A2C', 'Apical 2-Ch'),
+            'PLAX': ('PLAX', 'ParaStern'),
+            'PSAX': ('PSAX', 'Short Axis'),
+        }
+        view_abbr, view_desc = view_names.get(self.cardiac_view, ('---', '---'))
+
+        # Cor baseada na confiança
+        conf_pct = int(self.cardiac_view_confidence * 100)
+        if self.cardiac_view_confidence >= 0.7:
+            view_color = (100, 255, 100)  # Verde
+        elif self.cardiac_view_confidence >= 0.4:
+            view_color = (0, 200, 255)  # Amarelo
+        else:
+            view_color = (120, 120, 150)  # Cinza
+
+        cv2.putText(output, view_abbr, (18, view_y + 18),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.5, view_color, 1, cv2.LINE_AA)
+        cv2.putText(output, f"({conf_pct}%)", (60, view_y + 18),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (100, 100, 120), 1, cv2.LINE_AA)
 
         # ═══════════════════════════════════════
         # LEGENDA DE CAMARAS
@@ -3021,6 +3222,106 @@ class AIProcessor:
             return True
 
         return False
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # LUNG ZONES - Navegação e Confirmação (Protocolo BLUE)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _lung_get_next_zone(self):
+        """Retorna a próxima zona pendente ou None se todas checadas."""
+        current_idx = self.lung_zone_order.index(self.lung_current_zone)
+        # Procurar próxima pendente
+        for i in range(current_idx + 1, len(self.lung_zone_order)):
+            zone = self.lung_zone_order[i]
+            if self.lung_zones[zone]['status'] != 'checked':
+                return zone
+        # Procurar desde o início
+        for i in range(0, current_idx):
+            zone = self.lung_zone_order[i]
+            if self.lung_zones[zone]['status'] != 'checked':
+                return zone
+        return None
+
+    def _lung_confirm_current_zone(self):
+        """Confirma a zona atual com os dados coletados."""
+        now = time.time()
+        zone = self.lung_current_zone
+        zone_data = self.lung_zones[zone]
+
+        # Salvar dados da zona
+        zone_data['status'] = 'checked'
+        zone_data['b_lines'] = self.b_line_count
+        zone_data['a_lines'] = self.lung_a_lines_detected
+        zone_data['sliding'] = self.lung_pleura_sliding
+        zone_data['profile'] = 'B' if self.b_line_count >= 3 else 'A'
+
+        if self.lung_zone_start_time:
+            zone_data['time_spent'] = now - self.lung_zone_start_time
+
+        # Feedback sonoro
+        self._lung_play_confirm_sound()
+
+        # Verificar se todas as zonas foram checadas
+        total_checked = sum(1 for z in self.lung_zones.values() if z['status'] == 'checked')
+        if total_checked >= len(self.lung_zones):
+            self.lung_exam_complete = True
+            self._lung_play_complete_sound()
+            return
+
+        # Avançar para próxima zona
+        next_zone = self._lung_get_next_zone()
+        if next_zone:
+            self.lung_current_zone = next_zone
+            self.lung_zone_start_time = now
+            # Limpar históricos
+            self.lung_b_line_history.clear()
+            self.lung_b_line_density_history.clear()
+
+    def _lung_navigate_to(self, zone_key):
+        """Navega para uma zona específica."""
+        if zone_key in self.lung_zones:
+            self.lung_current_zone = zone_key
+            self.lung_zone_start_time = time.time()
+            self.lung_b_line_history.clear()
+            self.lung_b_line_density_history.clear()
+
+    def _lung_play_confirm_sound(self):
+        """Reproduz som de confirmação de zona."""
+        def play():
+            try:
+                subprocess.run(['afplay', '/System/Library/Sounds/Pop.aiff'],
+                             capture_output=True, timeout=2)
+            except Exception:
+                pass
+        threading.Thread(target=play, daemon=True).start()
+
+    def _lung_play_complete_sound(self):
+        """Reproduz som de exame completo."""
+        def play():
+            try:
+                subprocess.run(['afplay', '/System/Library/Sounds/Glass.aiff'],
+                             capture_output=True, timeout=2)
+            except Exception:
+                pass
+        threading.Thread(target=play, daemon=True).start()
+
+    def _lung_reset_exam(self):
+        """Reseta o exame de zonas pulmonares."""
+        for zone in self.lung_zones:
+            self.lung_zones[zone] = {
+                'status': 'pending',
+                'b_lines': 0,
+                'a_lines': False,
+                'sliding': True,
+                'profile': 'A',
+                'time_spent': 0.0,
+            }
+        self.lung_current_zone = 'R1'
+        self.lung_zone_start_time = None
+        self.lung_exam_complete = False
+        self.lung_exam_start_time = None
+        self.lung_b_line_history.clear()
+        self.lung_b_line_density_history.clear()
 
     def _process_fast(self, frame):
         """FAST Protocol - Sistema avancado de trauma estilo Clarius."""
@@ -4547,7 +4848,7 @@ class AIProcessor:
             interpretation = "Severe pulmonary edema"
 
         # ═══════════════════════════════════════
-        # PAINEL PRINCIPAL
+        # PAINEL PRINCIPAL (usando UI Utils)
         # ═══════════════════════════════════════
 
         panel_w = 175
@@ -4555,19 +4856,16 @@ class AIProcessor:
         panel_y = 10
         panel_h = 220
 
-        overlay = output.copy()
-        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
-                     (30, 35, 25), -1)
-        cv2.addWeighted(overlay, 0.88, output, 0.12, 0, output)
-        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
-                     (150, 200, 100), 1)
+        # Painel com header (tema verde para lung)
+        lung_border = (150, 200, 100)
+        content_y = draw_panel(output, panel_x, panel_y, panel_w, panel_h,
+                               title="LUNG AI",
+                               border_color=lung_border,
+                               title_color=(180, 230, 150))
 
-        cv2.putText(output, "LUNG AI", (panel_x + 10, panel_y + 22),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.5, (180, 230, 150), 1, cv2.LINE_AA)
-
-        # Profile type
-        cv2.putText(output, profile, (panel_x + 90, panel_y + 22),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.35, status_color, 1, cv2.LINE_AA)
+        # Profile type no header
+        cv2.putText(output, profile, (panel_x + 90, panel_y + 18),
+                   FONT, FONT_SCALE_SMALL, status_color, 1, cv2.LINE_AA)
 
         # B-Lines
         bl_y = panel_y + 55
@@ -4628,44 +4926,118 @@ class AIProcessor:
                    cv2.FONT_HERSHEY_DUPLEX, 0.5, (180, 230, 160), 1, cv2.LINE_AA)
 
         # ═══════════════════════════════════════
-        # LEGENDA
+        # LEGENDA (usando UI Utils)
         # ═══════════════════════════════════════
 
         legend_x = 10
-        legend_y = h - 75
-        legend_w = 130
-        legend_h = 65
-
-        overlay = output.copy()
-        cv2.rectangle(overlay, (legend_x, legend_y), (legend_x + legend_w, legend_y + legend_h),
-                     (30, 35, 30), -1)
-        cv2.addWeighted(overlay, 0.85, output, 0.15, 0, output)
-        cv2.rectangle(output, (legend_x, legend_y), (legend_x + legend_w, legend_y + legend_h),
-                     (100, 120, 80), 1)
-
-        cv2.putText(output, "LEGEND", (legend_x + 5, legend_y + 15),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (100, 120, 100), 1, cv2.LINE_AA)
-
-        items = [
+        legend_y = h - 70
+        legend_items = [
             ("Pleura", (200, 255, 200)),
             ("A-lines", (0, 200, 200)),
             ("B-lines", (0, 180, 255)),
         ]
-        for i, (name, color) in enumerate(items):
-            iy = legend_y + 30 + i * 12
-            cv2.line(output, (legend_x + 8, iy - 2), (legend_x + 25, iy - 2), color, 2)
-            cv2.putText(output, name, (legend_x + 30, iy),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.25, color, 1, cv2.LINE_AA)
+
+        # Mini painel para legenda
+        draw_panel(output, legend_x, legend_y, 100, 55,
+                  title="LEGEND", border_color=(100, 120, 80),
+                  title_color=(100, 120, 100), header_height=18)
+        draw_legend(output, legend_x + 5, legend_y + 25, legend_items)
 
         # Indicador de baixa qualidade
         if low_quality_mode:
-            alert_y = 85
-            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
-                         (40, 50, 40), -1)
-            cv2.rectangle(output, (w//2 - 90, alert_y), (w//2 + 90, alert_y + 28),
-                         (100, 150, 100), 2)
-            cv2.putText(output, "LOW QUALITY - ADJUST", (w//2 - 78, alert_y + 20),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.38, (180, 220, 180), 1, cv2.LINE_AA)
+            draw_warning_banner(output, "LOW QUALITY - ADJUST", y=95,
+                              color=(180, 220, 180))
+
+        # ═══════════════════════════════════════
+        # PAINEL DE ZONAS (Protocolo BLUE)
+        # ═══════════════════════════════════════
+
+        # Inicializar timer da zona se necessário
+        now = time.time()
+        if self.lung_zone_start_time is None:
+            self.lung_zone_start_time = now
+            self.lung_exam_start_time = now
+
+        # Atualizar status da zona atual
+        self.lung_zones[self.lung_current_zone]['status'] = 'scanning'
+
+        zone_panel_x = 10
+        zone_panel_y = legend_y - 180
+        zone_panel_w = 130
+        zone_panel_h = 170
+
+        overlay = output.copy()
+        cv2.rectangle(overlay, (zone_panel_x, zone_panel_y),
+                     (zone_panel_x + zone_panel_w, zone_panel_y + zone_panel_h),
+                     (30, 40, 35), -1)
+        cv2.addWeighted(overlay, 0.88, output, 0.12, 0, output)
+        cv2.rectangle(output, (zone_panel_x, zone_panel_y),
+                     (zone_panel_x + zone_panel_w, zone_panel_y + zone_panel_h),
+                     (100, 150, 120), 1)
+
+        cv2.putText(output, "LUNG ZONES", (zone_panel_x + 5, zone_panel_y + 15),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (150, 200, 150), 1, cv2.LINE_AA)
+
+        # Mostrar zonas em 2 colunas (R e L)
+        col_w = zone_panel_w // 2
+        for col, side in enumerate(['R', 'L']):
+            for row in range(4):
+                zone_key = f"{side}{row + 1}"
+                zone_data = self.lung_zones[zone_key]
+                zx = zone_panel_x + 5 + col * col_w
+                zy = zone_panel_y + 30 + row * 18
+
+                # Cor baseada no status
+                if zone_data['status'] == 'checked':
+                    if zone_data['profile'] == 'B':
+                        zone_color = (0, 180, 255)  # B-profile: laranja
+                    else:
+                        zone_color = (100, 200, 100)  # A-profile: verde
+                    marker = "+"
+                elif zone_key == self.lung_current_zone:
+                    zone_color = (0, 255, 255)  # Atual: amarelo
+                    marker = ">"
+                else:
+                    zone_color = (80, 80, 100)  # Pendente: cinza
+                    marker = " "
+
+                cv2.putText(output, f"{marker}{zone_key}", (zx, zy),
+                           cv2.FONT_HERSHEY_DUPLEX, 0.28, zone_color, 1, cv2.LINE_AA)
+
+        # Contagem de zonas checadas
+        checked_count = sum(1 for z in self.lung_zones.values() if z['status'] == 'checked')
+        progress_text = f"{checked_count}/8 ZONES"
+        cv2.putText(output, progress_text, (zone_panel_x + 5, zone_panel_y + zone_panel_h - 25),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (140, 180, 140), 1, cv2.LINE_AA)
+
+        # Timer da zona atual
+        zone_elapsed = now - self.lung_zone_start_time if self.lung_zone_start_time else 0
+        timer_text = f"{self.lung_current_zone}: {zone_elapsed:.1f}s"
+        cv2.putText(output, timer_text, (zone_panel_x + 5, zone_panel_y + zone_panel_h - 10),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (0, 255, 255), 1, cv2.LINE_AA)
+
+        # EXAM COMPLETE banner
+        if self.lung_exam_complete:
+            banner_y = h // 2 - 30
+            overlay = output.copy()
+            cv2.rectangle(overlay, (w//2 - 120, banner_y), (w//2 + 120, banner_y + 60),
+                         (40, 80, 40), -1)
+            cv2.addWeighted(overlay, 0.9, output, 0.1, 0, output)
+            cv2.rectangle(output, (w//2 - 120, banner_y), (w//2 + 120, banner_y + 60),
+                         (100, 255, 100), 2)
+            cv2.putText(output, "LUNG EXAM COMPLETE", (w//2 - 100, banner_y + 25),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.55, (100, 255, 100), 1, cv2.LINE_AA)
+
+            # Resumo
+            b_zones = sum(1 for z in self.lung_zones.values() if z['profile'] == 'B')
+            summary = f"A-profile: {8 - b_zones} | B-profile: {b_zones}"
+            cv2.putText(output, summary, (w//2 - 80, banner_y + 45),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.35, (180, 220, 180), 1, cv2.LINE_AA)
+
+        # Instruções de navegação
+        nav_text = "< > Navigate | SPACE Confirm"
+        cv2.putText(output, nav_text, (zone_panel_x + 5, zone_panel_y + zone_panel_h - 40),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.2, (100, 120, 100), 1, cv2.LINE_AA)
 
         self._draw_auto_gain_status(output, 20, 60, gain_info, color=(170, 200, 140))
 
@@ -5103,6 +5475,49 @@ class AIProcessor:
                          (150, 100, 150), 2)
             cv2.putText(output, "LOW QUALITY - ADJUST", (w//2 - 78, alert_y + 20),
                        cv2.FONT_HERSHEY_DUPLEX, 0.38, (220, 180, 220), 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════
+        # GUIA DE POSICIONAMENTO (Dual-View)
+        # ═══════════════════════════════════════
+        now = time.time()
+        trans_valid = self.bladder_view_data['transverse']['t'] and (now - self.bladder_view_data['transverse']['t'] < 10.0)
+        sag_valid = self.bladder_view_data['sagittal']['t'] and (now - self.bladder_view_data['sagittal']['t'] < 10.0)
+
+        # Mostrar hint apenas se uma view foi capturada mas a outra não
+        if (trans_valid and not sag_valid) or (sag_valid and not trans_valid):
+            hint_y = 60
+            needed_view = "SAGITTAL" if trans_valid else "TRANSVERSE"
+            hint_text = f"Rotate probe for {needed_view} view"
+
+            overlay = output.copy()
+            cv2.rectangle(overlay, (w//2 - 130, hint_y), (w//2 + 130, hint_y + 35),
+                         (50, 40, 60), -1)
+            cv2.addWeighted(overlay, 0.9, output, 0.1, 0, output)
+            cv2.rectangle(output, (w//2 - 130, hint_y), (w//2 + 130, hint_y + 35),
+                         (180, 140, 200), 1)
+
+            # Ícone de rotação
+            cx = w//2 - 115
+            cy = hint_y + 18
+            cv2.ellipse(output, (cx, cy), (8, 8), 0, 30, 330, (0, 255, 255), 2)
+            # Seta da rotação
+            cv2.line(output, (cx + 6, cy - 5), (cx + 10, cy - 8), (0, 255, 255), 2)
+            cv2.line(output, (cx + 6, cy - 5), (cx + 10, cy - 2), (0, 255, 255), 2)
+
+            cv2.putText(output, hint_text, (w//2 - 95, hint_y + 23),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.38, (0, 255, 255), 1, cv2.LINE_AA)
+
+        # Indicador de dual-view ativa
+        elif trans_valid and sag_valid:
+            dual_y = 60
+            overlay = output.copy()
+            cv2.rectangle(overlay, (w//2 - 80, dual_y), (w//2 + 80, dual_y + 28),
+                         (40, 60, 40), -1)
+            cv2.addWeighted(overlay, 0.9, output, 0.1, 0, output)
+            cv2.rectangle(output, (w//2 - 80, dual_y), (w//2 + 80, dual_y + 28),
+                         (100, 200, 100), 1)
+            cv2.putText(output, "DUAL-VIEW ACTIVE", (w//2 - 65, dual_y + 19),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.38, (100, 255, 100), 1, cv2.LINE_AA)
 
         self._draw_auto_gain_status(output, 20, 60, gain_info, color=(200, 160, 220))
 

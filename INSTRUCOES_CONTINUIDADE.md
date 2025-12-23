@@ -50,8 +50,14 @@ Somente apos isso, continuar o desenvolvimento.
 5. Se precisar validar UI, abrir o app:
    - `python3 main.py`
 6. Foco atual de melhoria (ordem):
-   - FAST Protocol (melhorar confianca e workflow)
-   - LUNG / BLADDER / CARDIAC (refinar overlays e criterios)
+   - [OK] FAST Protocol (SCAN Q gating + auto-navegacao) ✓
+   - [OK] Voice Controls (maos livres com reconhecimento de voz) ✓
+   - [OK] LUNG (protocolo BLUE - 8 zonas navegaveis) ✓
+   - [OK] BLADDER (guias visuais dual-view) ✓
+   - [OK] CARDIAC (deteccao automatica de view A4C/PLAX/PSAX) ✓
+   - [OK] NERVE (fallback premium com CSA + SCAN Q) ✓
+   - Geracao de relatorios PDF
+   - Historico e persistencia
 7. Antes de encerrar a sessao:
    - Atualizar `DIARIO.md` e `INSTRUCOES_CONTINUIDADE.md`
    - Commitar apenas o que foi feito nesta sessao
@@ -230,7 +236,7 @@ Arquivos de pesquisa em:
 ## ESTADO ATUAL DO PROJETO (ATUALIZAR A CADA SESSAO)
 ====================================================================
 
-### Ultima atualizacao: 2025-12-23 (Sessao 20)
+### Ultima atualizacao: 2025-12-23 (Sessao 21)
 
 - Registro central `plugin_registry.py` com nomes de pesos, formatos de label e modelos por plugin.
 - Unified dataset manager expandido (FAST/ANATOMY/BLADDER/LUNG) + novos sinteticos (bladder/lung/fast).
@@ -249,6 +255,16 @@ Arquivos de pesquisa em:
 - Repo inclui `datasets/unified/` e `training/checkpoints/` (grande, ~785MB).
 - Evitar `git add/commit/push` enquanto o treino em outro terminal estiver escrevendo artefatos grandes (risco de timeout/corrupcao).
 
+### Implementado na Sessao 21:
+- main.py refatorado: print->logger, constantes, null checks, handler ENTER consolidado
+- NERVE Track fallback premium:
+  - Deteccao por contornos adaptativos (threshold + morfologia)
+  - Classificacao por features: echogenicidade, circularidade, aspect ratio
+  - CSA (Cross-Sectional Area) em mm² com calibracao
+  - SCAN Q gating (aviso quando qualidade < 35%)
+  - Painel visual com lista de estruturas detectadas
+  - Overlay com transparencia + elipse fitting
+
 ### Implementado na Sessao 20:
 - SCAN Q Gating em FAST/LUNG/BLADDER/CARDIAC (qualidade < 35% = deteccoes suspensas)
 - Indicador visual "LOW QUALITY - ADJUST" quando qualidade baixa
@@ -260,9 +276,9 @@ Arquivos de pesquisa em:
   - Atalhos: < > (navegar), SPACE (confirmar)
 
 ### Proximos passos recomendados (ordem sugerida)
-1. Testar FAST auto-navegacao em cenarios reais
-2. Voice controls para operacao hands-free (freeze, record, modos)
-3. Geracao de relatorios PDF com capturas e medicoes
+1. Voice controls para operacao hands-free (freeze, record, modos)
+2. Geracao de relatorios PDF com capturas e medicoes
+3. Historico de exames com persistencia local
 4. Integracao com Siri/voz nativa do macOS
 
 ====================================================================
