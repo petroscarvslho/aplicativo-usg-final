@@ -559,11 +559,11 @@ class AIProcessor:
         self.lung_exam_complete = False
         self.lung_exam_start_time = None
 
-        # Bladder AI
+        # Bladder AI - Core
         self.bladder_history = deque(maxlen=30)
-        self.bladder_d1 = None
-        self.bladder_d2 = None
-        self.bladder_d3 = None
+        self.bladder_d1 = None  # Width (transverse)
+        self.bladder_d2 = None  # Height (CC)
+        self.bladder_d3 = None  # AP depth
         self.bladder_pvr_mode = False
         self.bladder_pre_void = None
         self.bladder_view = None
@@ -577,6 +577,18 @@ class AIProcessor:
             'transverse': deque(maxlen=8),
             'sagittal': deque(maxlen=8),
         }
+
+        # Bladder AI - Advanced
+        self.bladder_volume_formulas = {}  # Volume por cada fórmula
+        self.bladder_wall_thickness = None  # mm
+        self.bladder_wall_thickened = False  # > 5mm é anormal
+        self.bladder_post_void = None  # Volume pós-miccional
+        self.bladder_pvr_calculated = False
+        self.bladder_pvr_value = None  # PVR = pre - post
+        self.bladder_pvr_status = None  # normal (<100ml), elevated, high
+        self.bladder_ureteral_jets = False  # Jets detectados
+        self.bladder_trabeculation = False  # Parede irregular
+        self.bladder_diverticula = False  # Divertículos detectados
 
         # ═══════════════════════════════════════════════════════════════════════
         # NERVE TRACK v2.0 PREMIUM - Sistema Avançado de Detecção de Nervos
@@ -5805,6 +5817,222 @@ class AIProcessor:
 
         return output
 
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # BLADDER AI - Funções Auxiliares Avançadas
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _bladder_calculate_volumes(self, d1, d2, d3):
+        """
+        Calcula volume da bexiga usando múltiplas fórmulas.
+
+        Fórmulas usadas em equipamentos comerciais:
+        1. Ellipsoid: V = 0.52 × D1 × D2 × D3 (BladderScan)
+        2. Prolate Ellipsoid: V = (π/6) × D1 × D2 × D3
+        3. Modified Ellipsoid: V = 0.75 × D1 × D2 × D3 (Clarius-like)
+        4. Height-corrected: V = 0.65 × D1 × D2 × D3
+
+        Returns:
+            dict: Volume por cada fórmula + média
+        """
+        if d1 is None or d2 is None or d3 is None:
+            return {}
+
+        # Converter para cm (fórmulas usam cm, resultado em ml)
+        d1_cm = d1 / 10
+        d2_cm = d2 / 10
+        d3_cm = d3 / 10
+
+        volumes = {}
+
+        # 1. BladderScan standard (0.52)
+        volumes['bladderscan'] = 0.52 * d1_cm * d2_cm * d3_cm * 1000  # ml
+
+        # 2. Prolate Ellipsoid (π/6 ≈ 0.523)
+        volumes['prolate'] = (np.pi / 6) * d1_cm * d2_cm * d3_cm * 1000
+
+        # 3. Modified Ellipsoid (0.75) - tende a superestimar
+        volumes['modified'] = 0.75 * d1_cm * d2_cm * d3_cm * 1000
+
+        # 4. Height-corrected (0.65)
+        volumes['height_corrected'] = 0.65 * d1_cm * d2_cm * d3_cm * 1000
+
+        # 5. Média ponderada (BladderScan tem mais peso por ser mais validado)
+        volumes['average'] = (
+            0.4 * volumes['bladderscan'] +
+            0.3 * volumes['prolate'] +
+            0.15 * volumes['modified'] +
+            0.15 * volumes['height_corrected']
+        )
+
+        self.bladder_volume_formulas = volumes
+        return volumes
+
+    def _bladder_measure_wall_thickness(self, gray, contour):
+        """
+        Mede espessura da parede vesical anterior.
+
+        Parede normal: 3-5mm quando distendida
+        Parede espessada: >5mm (pode indicar obstrução, inflamação)
+
+        Returns:
+            (thickness_mm, is_thickened)
+        """
+        if contour is None or len(contour) < 10:
+            return None, False
+
+        # Encontrar ponto superior do contorno (parede anterior)
+        points = contour.reshape(-1, 2)
+        top_idx = np.argmin(points[:, 1])
+        top_point = points[top_idx]
+
+        # Região acima do ponto superior para medir transição
+        x, y = top_point
+        h, w = gray.shape[:2]
+
+        if y < 20:
+            return None, False
+
+        # Perfil vertical acima do ponto
+        x = int(np.clip(x, 5, w - 5))
+        profile = gray[max(0, y-50):y, x]
+
+        if len(profile) < 10:
+            return None, False
+
+        # Derivada do perfil para encontrar bordas
+        gradient = np.abs(np.diff(profile.astype(float)))
+
+        # Encontrar picos de gradiente (bordas da parede)
+        threshold = np.percentile(gradient, 75) if len(gradient) > 0 else 50
+        edge_positions = np.where(gradient > threshold)[0]
+
+        if len(edge_positions) < 2:
+            return None, False
+
+        # Distância entre primeira e última borda significativa
+        wall_pixels = edge_positions[-1] - edge_positions[0]
+
+        # Converter para mm
+        mm_per_px = 0.3
+        thickness_mm = wall_pixels * mm_per_px
+
+        # Parede espessada se > 5mm (com bexiga distendida)
+        is_thickened = thickness_mm > 5.0
+
+        self.bladder_wall_thickness = thickness_mm
+        self.bladder_wall_thickened = is_thickened
+
+        return thickness_mm, is_thickened
+
+    def _bladder_detect_trabeculation(self, gray, contour):
+        """
+        Detecta trabeculação da parede (irregularidade).
+
+        Trabeculação indica hipertrofia do detrusor,
+        comum em obstrução urinária crônica.
+
+        Returns:
+            bool: True se trabeculação detectada
+        """
+        if contour is None:
+            return False
+
+        # Calcular irregularidade do contorno
+        perimeter = cv2.arcLength(contour, True)
+        hull = cv2.convexHull(contour)
+        hull_perimeter = cv2.arcLength(hull, True)
+
+        if hull_perimeter == 0:
+            return False
+
+        irregularity = perimeter / hull_perimeter
+
+        # Trabeculação: contorno muito irregular (>1.3)
+        self.bladder_trabeculation = irregularity > 1.3
+        return self.bladder_trabeculation
+
+    def _bladder_calculate_pvr(self, current_volume):
+        """
+        Calcula Post-Void Residual (PVR).
+
+        Workflow:
+        1. Medir volume pré-miccional (paciente com bexiga cheia)
+        2. Paciente esvazia bexiga
+        3. Medir volume pós-miccional
+        4. PVR = pré - pós
+
+        Interpretação:
+        - Normal: PVR < 50ml
+        - Leve: 50-100ml
+        - Moderado: 100-200ml
+        - Elevado: >200ml (indica problema de esvaziamento)
+        """
+        if not self.bladder_pvr_mode:
+            return
+
+        if self.bladder_pre_void is None:
+            # Ainda não temos medida pré
+            self.bladder_pre_void = current_volume
+            return
+
+        # Calcular PVR
+        self.bladder_post_void = current_volume
+        self.bladder_pvr_value = max(0, self.bladder_pre_void - self.bladder_post_void)
+        self.bladder_pvr_calculated = True
+
+        # Classificar
+        if self.bladder_pvr_value < 50:
+            self.bladder_pvr_status = 'normal'
+        elif self.bladder_pvr_value < 100:
+            self.bladder_pvr_status = 'mild'
+        elif self.bladder_pvr_value < 200:
+            self.bladder_pvr_status = 'moderate'
+        else:
+            self.bladder_pvr_status = 'elevated'
+
+    def _bladder_detect_ureteral_jets(self, prev_frame, curr_frame, contour):
+        """
+        Detecta jatos uretrais usando diferença entre frames.
+
+        Jets aparecem como fluxo periódico entrando na bexiga
+        pelos óstios ureterais (posterolateral).
+
+        Returns:
+            bool: True se jets detectados
+        """
+        if prev_frame is None or contour is None:
+            return False
+
+        # Criar máscara da bexiga
+        h, w = curr_frame.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(mask, [contour], -1, 255, -1)
+
+        # Diferença absoluta
+        diff = cv2.absdiff(prev_frame, curr_frame)
+        diff_masked = cv2.bitwise_and(diff, mask)
+
+        # Threshold para movimento
+        _, motion_mask = cv2.threshold(diff_masked, 20, 255, cv2.THRESH_BINARY)
+
+        # Jets são pequenas áreas de movimento na região posterior
+        # (parte inferior da bexiga na maioria das views)
+        contours, _ = cv2.findContours(motion_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        jet_candidates = 0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if 50 < area < 500:  # Tamanho típico de jet
+                M = cv2.moments(cnt)
+                if M["m00"] > 0:
+                    cy = int(M["m01"] / M["m00"])
+                    # Jets geralmente na metade inferior
+                    if cy > h * 0.5:
+                        jet_candidates += 1
+
+        self.bladder_ureteral_jets = jet_candidates >= 1
+        return self.bladder_ureteral_jets
+
     def _process_bladder(self, frame):
         """Bladder AI - Sistema avancado de volume vesical estilo Clarius."""
         output = frame.copy()
@@ -6018,8 +6246,9 @@ class AIProcessor:
                 self.bladder_d2 = minor_mm
                 self.bladder_d3 = (self.bladder_d1 + self.bladder_d2) / 2
 
-            # Formula do elipsoide: V = 0.52 x D1 x D2 x D3
-            volume_ml = 0.52 * self.bladder_d1 * self.bladder_d2 * self.bladder_d3 / 1000
+            # ═══ CÁLCULO DE VOLUME AVANÇADO (múltiplas fórmulas) ═══
+            volumes = self._bladder_calculate_volumes(self.bladder_d1, self.bladder_d2, self.bladder_d3)
+            volume_ml = volumes.get('average', 0.52 * self.bladder_d1 * self.bladder_d2 * self.bladder_d3 / 1000)
             volume_ml = max(0, min(1000, volume_ml))
 
             self.bladder_history.append(volume_ml)
@@ -6027,6 +6256,16 @@ class AIProcessor:
                 volume_ml = float(np.median(self.bladder_history))
             self.bladder_volume = volume_ml
             self.bladder_last_update = now
+
+            # ═══ ANÁLISES AVANÇADAS ═══
+            # Medir espessura da parede
+            self._bladder_measure_wall_thickness(gray, contour_to_draw)
+
+            # Detectar trabeculação
+            self._bladder_detect_trabeculation(gray, contour_to_draw)
+
+            # Calcular PVR se em modo PVR
+            self._bladder_calculate_pvr(volume_ml)
 
             # ═══════════════════════════════════════
             # VISUALIZACAO DA BEXIGA
@@ -6158,18 +6397,33 @@ class AIProcessor:
                    cv2.FONT_HERSHEY_DUPLEX, 0.28, (120, 110, 140), 1, cv2.LINE_AA)
 
         if self.bladder_d1 is not None:
-            cv2.putText(output, f"D1: {self.bladder_d1:.0f}mm", (panel_x + 10, dim_y + 18),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.3, (200, 180, 150), 1, cv2.LINE_AA)
-            cv2.putText(output, f"D2: {self.bladder_d2:.0f}mm", (panel_x + 85, dim_y + 18),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.3, (150, 180, 220), 1, cv2.LINE_AA)
-            cv2.putText(output, f"D3: {self.bladder_d3:.0f}mm (est)", (panel_x + 10, dim_y + 35),
+            cv2.putText(output, f"D1: {self.bladder_d1:.0f}mm", (panel_x + 10, dim_y + 16),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.28, (200, 180, 150), 1, cv2.LINE_AA)
+            cv2.putText(output, f"D2: {self.bladder_d2:.0f}mm", (panel_x + 85, dim_y + 16),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.28, (150, 180, 220), 1, cv2.LINE_AA)
+            cv2.putText(output, f"D3: {self.bladder_d3:.0f}mm", (panel_x + 10, dim_y + 32),
                        cv2.FONT_HERSHEY_DUPLEX, 0.28, (140, 140, 160), 1, cv2.LINE_AA)
 
-        # Formula
-        cv2.putText(output, "V = 0.52 x D1 x D2 x D3", (panel_x + 10, dim_y + 55),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.25, (100, 90, 120), 1, cv2.LINE_AA)
+        # ═══ WALL THICKNESS ═══
+        wall_y = dim_y + 48
+        cv2.putText(output, "WALL", (panel_x + 10, wall_y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.26, (120, 110, 140), 1, cv2.LINE_AA)
+        if self.bladder_wall_thickness is not None:
+            wall_color = (0, 100, 255) if self.bladder_wall_thickened else (100, 200, 100)
+            wall_text = f"{self.bladder_wall_thickness:.1f}mm"
+            if self.bladder_wall_thickened:
+                wall_text += " !"
+            cv2.putText(output, wall_text, (panel_x + 55, wall_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.28, wall_color, 1, cv2.LINE_AA)
+            if self.bladder_trabeculation:
+                cv2.putText(output, "TRAB", (panel_x + 115, wall_y),
+                           cv2.FONT_HERSHEY_DUPLEX, 0.22, (0, 165, 255), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(output, "---", (panel_x + 55, wall_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.28, (100, 100, 120), 1, cv2.LINE_AA)
 
         # View + qualidade
+        view_y = dim_y + 65
         view_label = self.bladder_view.upper() if self.bladder_view else "---"
         if self.bladder_view == "transverse":
             view_label = "TRANS"
@@ -6180,17 +6434,34 @@ class AIProcessor:
                 view_label = "DUAL"
 
         qual_pct = int(self.bladder_quality * 100)
-        cv2.putText(output, f"VIEW: {view_label}", (panel_x + 10, dim_y + 70),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (130, 120, 150), 1, cv2.LINE_AA)
-        cv2.putText(output, f"QUALITY: {qual_pct}%", (panel_x + 10, dim_y + 88),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.28, (130, 120, 150), 1, cv2.LINE_AA)
+        cv2.putText(output, f"VIEW: {view_label}", (panel_x + 10, view_y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.26, (130, 120, 150), 1, cv2.LINE_AA)
+        cv2.putText(output, f"Q: {qual_pct}%", (panel_x + 100, view_y),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.26, (130, 120, 150), 1, cv2.LINE_AA)
 
-        # PVR indicator
-        pvr_y = panel_y + panel_h - 15
-        if self.bladder_pvr_mode and self.bladder_pre_void:
-            pvr = self.bladder_volume if self.bladder_volume else 0
-            cv2.putText(output, f"PVR: {int(pvr)}mL", (panel_x + 10, pvr_y),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.32, (200, 200, 150), 1, cv2.LINE_AA)
+        # ═══ PVR (Post-Void Residual) ═══
+        pvr_y = panel_y + panel_h - 18
+        if self.bladder_pvr_calculated and self.bladder_pvr_value is not None:
+            # PVR calculado
+            pvr_colors = {
+                'normal': (100, 255, 100),
+                'mild': (0, 255, 255),
+                'moderate': (0, 165, 255),
+                'elevated': (0, 0, 255)
+            }
+            pvr_color = pvr_colors.get(self.bladder_pvr_status, (150, 150, 150))
+            cv2.putText(output, f"PVR: {int(self.bladder_pvr_value)}mL", (panel_x + 10, pvr_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.32, pvr_color, 1, cv2.LINE_AA)
+            cv2.putText(output, self.bladder_pvr_status.upper(), (panel_x + 100, pvr_y),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.25, pvr_color, 1, cv2.LINE_AA)
+        elif self.bladder_pvr_mode:
+            # Modo PVR ativo mas ainda aguardando
+            if self.bladder_pre_void:
+                cv2.putText(output, f"PRE: {int(self.bladder_pre_void)}mL", (panel_x + 10, pvr_y),
+                           cv2.FONT_HERSHEY_DUPLEX, 0.28, (200, 200, 150), 1, cv2.LINE_AA)
+            else:
+                cv2.putText(output, "PVR: Measuring pre...", (panel_x + 10, pvr_y),
+                           cv2.FONT_HERSHEY_DUPLEX, 0.25, (150, 150, 180), 1, cv2.LINE_AA)
 
         # ═══════════════════════════════════════
         # HEADER PREMIUM
