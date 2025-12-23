@@ -55,6 +55,9 @@ Somente apos isso, continuar o desenvolvimento.
 7. Antes de encerrar a sessao:
    - Atualizar `DIARIO.md` e `INSTRUCOES_CONTINUIDADE.md`
    - Commitar apenas o que foi feito nesta sessao
+8. Se o treino estiver rodando em outro terminal:
+   - NAO rodar `git add/commit/push` enquanto arquivos grandes (`datasets/unified/*`, `training/checkpoints/*`, `models/*.pt`) estiverem sendo escritos.
+   - Esperar o treino acabar ou mover artefatos grandes para fora/LFS antes de tentar `git push` (evita timeout 408 e corrupcao).
 
 ### Status rapido (NEEDLE)
 - Dataset combinado inclui `brachial_real` (965 frames) + sintetico (total 5,965 amostras)
@@ -244,6 +247,7 @@ Arquivos de pesquisa em:
 - Auto Gain + Scan Quality overlay integrado em FAST/LUNG/BLADDER/CARDIAC.
 - Treinamento de datasets ocorre em outro terminal (nao iniciar aqui).
 - Repo inclui `datasets/unified/` e `training/checkpoints/` (grande, ~785MB).
+- Evitar `git add/commit/push` enquanto o treino em outro terminal estiver escrevendo artefatos grandes (risco de timeout/corrupcao).
 
 ### Proximos passos recomendados (ordem sugerida)
 1. FAST: usar SCAN Q como gating para reduzir falso positivo + opcional auto-check de janela.

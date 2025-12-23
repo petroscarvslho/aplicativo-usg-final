@@ -1,0 +1,9 @@
+{
+  "label_type": "point_yx",
+  "label_order": "yx",
+  "label_scale": "0_1",
+  "input_size": [
+    256,
+    256
+  ]
+}

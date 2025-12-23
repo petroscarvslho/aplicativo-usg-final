@@ -681,6 +681,7 @@ def compute_metrics(pred, target, config: Dict) -> Dict[str, float]:
 
         metrics["accuracy"] = (pred_np == target_np).mean()
 
+    metrics = {key: float(value) for key, value in metrics.items()}
     return metrics
 
 
