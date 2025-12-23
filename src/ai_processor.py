@@ -13,6 +13,8 @@ import time
 import os
 import json
 import logging
+import subprocess
+import threading
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any, Deque
 from collections import deque
@@ -427,15 +429,25 @@ class AIProcessor:
 
         # FAST Protocol
         self.fast_windows = {
-            'RUQ': {'status': 'pending', 'fluid': False, 'score': 0},
-            'LUQ': {'status': 'pending', 'fluid': False, 'score': 0},
-            'PELV': {'status': 'pending', 'fluid': False, 'score': 0},
-            'CARD': {'status': 'pending', 'fluid': False, 'score': 0},
+            'RUQ': {'status': 'pending', 'fluid': False, 'score': 0, 'time_spent': 0},
+            'LUQ': {'status': 'pending', 'fluid': False, 'score': 0, 'time_spent': 0},
+            'PELV': {'status': 'pending', 'fluid': False, 'score': 0, 'time_spent': 0},
+            'CARD': {'status': 'pending', 'fluid': False, 'score': 0, 'time_spent': 0},
         }
         self.fast_current_window = 'RUQ'
         self.fast_start_time = None
         self.fast_fluid_regions = []
         self.fast_window_history = {key: deque(maxlen=8) for key in self.fast_windows}
+
+        # FAST Auto-Navegacao
+        self.fast_window_order = ['RUQ', 'LUQ', 'PELV', 'CARD']
+        self.fast_window_start_time = None  # Quando iniciou a janela atual
+        self.fast_auto_advance = True       # Avancar automaticamente quando confirmar
+        self.fast_stability_time = 0.0      # Tempo com score estavel
+        self.fast_stability_threshold = 2.5 # Segundos de estabilidade para confirmar
+        self.fast_min_scan_time = 3.0       # Tempo minimo de scan por janela
+        self.fast_last_stable_score = 0.0   # Ultimo score estavel
+        self.fast_confirmed_pending = False # Confirmacao pendente (piscar)
 
         # Anatomy AI
         self.anatomy_structures = []
@@ -1252,11 +1264,16 @@ class AIProcessor:
 
         elif old_mode == 'fast':
             for key in self.fast_windows:
-                self.fast_windows[key] = {'status': 'pending', 'fluid': False, 'score': 0}
+                self.fast_windows[key] = {'status': 'pending', 'fluid': False, 'score': 0, 'time_spent': 0}
             self.fast_current_window = 'RUQ'
             self.fast_start_time = None
             self.fast_fluid_regions.clear()
             self.fast_window_history = {key: deque(maxlen=8) for key in self.fast_windows}
+            # Reset auto-navegacao
+            self.fast_window_start_time = None
+            self.fast_stability_time = 0.0
+            self.fast_last_stable_score = 0.0
+            self.fast_confirmed_pending = False
 
         elif old_mode == 'm_mode':
             self.mmode_buffer.clear()
@@ -2881,14 +2898,145 @@ class AIProcessor:
 
         return output
 
+    # =========================================================================
+    # FAST AUTO-NAVEGACAO - Metodos Auxiliares
+    # =========================================================================
+
+    def _fast_get_next_window(self):
+        """Retorna a proxima janela na ordem, ou None se todas checadas."""
+        current_idx = self.fast_window_order.index(self.fast_current_window)
+        for i in range(current_idx + 1, len(self.fast_window_order)):
+            key = self.fast_window_order[i]
+            if self.fast_windows[key]['status'] != 'checked':
+                return key
+        # Verificar se ha alguma pendente antes da atual
+        for i in range(0, current_idx):
+            key = self.fast_window_order[i]
+            if self.fast_windows[key]['status'] != 'checked':
+                return key
+        return None
+
+    def _fast_play_confirm_sound(self):
+        """Reproduz som de confirmacao (nao bloqueante)."""
+        def play():
+            try:
+                # macOS - usar afplay com som do sistema
+                subprocess.run(
+                    ['afplay', '/System/Library/Sounds/Pop.aiff'],
+                    capture_output=True,
+                    timeout=1
+                )
+            except Exception:
+                pass  # Ignorar erros de audio
+        threading.Thread(target=play, daemon=True).start()
+
+    def _fast_play_complete_sound(self):
+        """Reproduz som de exame completo."""
+        def play():
+            try:
+                subprocess.run(
+                    ['afplay', '/System/Library/Sounds/Glass.aiff'],
+                    capture_output=True,
+                    timeout=1
+                )
+            except Exception:
+                pass
+        threading.Thread(target=play, daemon=True).start()
+
+    def _fast_confirm_current_window(self):
+        """Confirma a janela atual e avanca para proxima se auto_advance ativo."""
+        current = self.fast_current_window
+        now = time.time()
+
+        # Marcar como checked
+        self.fast_windows[current]['status'] = 'checked'
+
+        # Registrar tempo gasto
+        if self.fast_window_start_time:
+            self.fast_windows[current]['time_spent'] = now - self.fast_window_start_time
+
+        # Reset estados de estabilidade
+        self.fast_stability_time = 0.0
+        self.fast_last_stable_score = 0.0
+        self.fast_confirmed_pending = False
+
+        # Verificar se todas as janelas foram checadas
+        total_checked = sum(1 for w in self.fast_windows.values() if w['status'] == 'checked')
+        if total_checked >= 4:
+            # Exame completo!
+            self._fast_play_complete_sound()
+        else:
+            # Janela confirmada
+            self._fast_play_confirm_sound()
+
+        # Avancar para proxima janela se auto_advance
+        if self.fast_auto_advance:
+            next_win = self._fast_get_next_window()
+            if next_win:
+                self.fast_current_window = next_win
+                self.fast_window_start_time = now
+                # Limpar historico da nova janela
+                self.fast_window_history[next_win].clear()
+
+    def _fast_navigate_to(self, window_key):
+        """Navega para uma janela especifica."""
+        if window_key in self.fast_windows:
+            self.fast_current_window = window_key
+            self.fast_window_start_time = time.time()
+            self.fast_stability_time = 0.0
+            self.fast_last_stable_score = 0.0
+            self.fast_confirmed_pending = False
+            self.fast_window_history[window_key].clear()
+
+    def _fast_check_stability(self, avg_score, scan_quality, dt):
+        """
+        Verifica estabilidade do score para auto-confirmacao.
+        Retorna True se a janela pode ser confirmada.
+        """
+        now = time.time()
+
+        # Nao confirmar se qualidade baixa
+        if scan_quality < 35:
+            self.fast_stability_time = 0.0
+            self.fast_confirmed_pending = False
+            return False
+
+        # Nao confirmar antes do tempo minimo de scan
+        if self.fast_window_start_time:
+            elapsed = now - self.fast_window_start_time
+            if elapsed < self.fast_min_scan_time:
+                return False
+
+        # Verificar se score esta estavel
+        score_diff = abs(avg_score - self.fast_last_stable_score)
+        if score_diff < 0.1:  # Score variou menos de 10%
+            self.fast_stability_time += dt
+        else:
+            self.fast_stability_time = 0.0
+            self.fast_last_stable_score = avg_score
+
+        # Janela pode ser confirmada se estavel por tempo suficiente
+        if self.fast_stability_time >= self.fast_stability_threshold:
+            self.fast_confirmed_pending = True
+            return True
+
+        return False
+
     def _process_fast(self, frame):
         """FAST Protocol - Sistema avancado de trauma estilo Clarius."""
         output = frame.copy()
         h, w = frame.shape[:2]
 
         # Inicializar start time do FAST se ainda nao foi
+        now = time.time()
         if self.fast_start_time is None:
-            self.fast_start_time = time.time()
+            self.fast_start_time = now
+            self.fast_window_start_time = now
+            self._fast_last_frame_time = now
+
+        # Calcular delta time entre frames
+        dt = now - getattr(self, '_fast_last_frame_time', now)
+        self._fast_last_frame_time = now
 
         # ═══════════════════════════════════════
         # DETECCAO DE LIQUIDO LIVRE (CV)
@@ -3047,6 +3195,29 @@ class AIProcessor:
                 current_win['fluid'] = False
 
         # ═══════════════════════════════════════
+        # AUTO-CONFIRMACAO DE JANELA
+        # ═══════════════════════════════════════
+
+        # Verificar se janela atual pode ser confirmada automaticamente
+        can_confirm = self._fast_check_stability(avg_score, scan_quality, dt)
+
+        # Calcular tempo na janela atual
+        window_elapsed = 0.0
+        if self.fast_window_start_time:
+            window_elapsed = now - self.fast_window_start_time
+
+        # Progresso para confirmacao (0-100%)
+        if window_elapsed < self.fast_min_scan_time:
+            confirm_progress = (window_elapsed / self.fast_min_scan_time) * 50
+        else:
+            confirm_progress = 50 + (self.fast_stability_time / self.fast_stability_threshold) * 50
+        confirm_progress = min(100, confirm_progress)
+
+        # Auto-confirmar se pronto e janela ainda pendente
+        if can_confirm and current_win['status'] != 'checked':
+            self._fast_confirm_current_window()
+
+        # ═══════════════════════════════════════
         # HEADER PREMIUM
         # ═══════════════════════════════════════
 
@@ -3129,11 +3300,17 @@ class AIProcessor:
             cv2.putText(output, detail, (box_x + 22, jy + 16),
                        cv2.FONT_HERSHEY_DUPLEX, 0.25, (100, 100, 110), 1, cv2.LINE_AA)
 
-            # Indicador de fluido detectado
+            # Indicador de fluido detectado ou tempo gasto
             if win['fluid']:
                 cv2.circle(output, (panel_x + panel_w - 20, jy + 4), 5, (0, 100, 255), -1)
                 cv2.putText(output, "+", (panel_x + panel_w - 24, jy + 8),
                            cv2.FONT_HERSHEY_DUPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+            elif win['status'] == 'checked' and win.get('time_spent', 0) > 0:
+                # Mostrar tempo gasto na janela
+                t = int(win['time_spent'])
+                time_str = f"{t}s"
+                cv2.putText(output, time_str, (panel_x + panel_w - 30, jy + 8),
+                           cv2.FONT_HERSHEY_DUPLEX, 0.25, (120, 150, 120), 1, cv2.LINE_AA)
 
         # ═══════════════════════════════════════
         # PAINEL DE STATUS (inferior esquerdo)
@@ -3197,20 +3374,33 @@ class AIProcessor:
         # GUIA DE JANELA ATUAL (inferior direito)
         # ═══════════════════════════════════════
 
-        guide_w = 170
+        guide_w = 175
         guide_x = w - guide_w - 10
-        guide_y = h - 80
-        guide_h = 70
+        guide_y = h - 115
+        guide_h = 105
 
         overlay = output.copy()
         cv2.rectangle(overlay, (guide_x, guide_y), (guide_x + guide_w, guide_y + guide_h),
                      (30, 40, 40), -1)
         cv2.addWeighted(overlay, 0.85, output, 0.15, 0, output)
-        cv2.rectangle(output, (guide_x, guide_y), (guide_x + guide_w, guide_y + guide_h),
-                     (100, 150, 150), 1)
 
+        # Borda que pisca se confirmando
+        if self.fast_confirmed_pending and int(now * 3) % 2 == 0:
+            border_color = (100, 255, 200)  # Verde piscando
+        else:
+            border_color = (100, 150, 150)
+        cv2.rectangle(output, (guide_x, guide_y), (guide_x + guide_w, guide_y + guide_h),
+                     border_color, 1)
+
+        # Header com timer da janela
         cv2.putText(output, "CURRENT VIEW", (guide_x + 10, guide_y + 18),
                    cv2.FONT_HERSHEY_DUPLEX, 0.3, (100, 130, 130), 1, cv2.LINE_AA)
+
+        # Timer da janela atual
+        win_secs = int(window_elapsed)
+        win_mins, win_secs = divmod(win_secs, 60)
+        cv2.putText(output, f"{win_mins:01d}:{win_secs:02d}", (guide_x + guide_w - 40, guide_y + 18),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.3, (150, 180, 150), 1, cv2.LINE_AA)
 
         current_name = {'RUQ': 'RUQ Morrison', 'LUQ': 'LUQ Spleen', 'PELV': 'Pelvic', 'CARD': 'Cardiac'}
         cv2.putText(output, current_name[self.fast_current_window], (guide_x + 10, guide_y + 40),
@@ -3225,6 +3415,42 @@ class AIProcessor:
         }
         cv2.putText(output, tips[self.fast_current_window], (guide_x + 10, guide_y + 58),
                    cv2.FONT_HERSHEY_DUPLEX, 0.28, (150, 180, 180), 1, cv2.LINE_AA)
+
+        # Barra de progresso para confirmacao
+        prog_bar_y = guide_y + 72
+        prog_bar_w = guide_w - 20
+        cv2.rectangle(output, (guide_x + 10, prog_bar_y), (guide_x + 10 + prog_bar_w, prog_bar_y + 8),
+                     (40, 50, 50), -1)
+        fill_w = int(prog_bar_w * confirm_progress / 100)
+        # Cor baseada no progresso
+        if confirm_progress < 50:
+            prog_color = (100, 150, 150)  # Cinza - scanning
+        elif confirm_progress < 100:
+            prog_color = (100, 200, 200)  # Ciano - estabilizando
+        else:
+            prog_color = (100, 255, 150)  # Verde - pronto
+        cv2.rectangle(output, (guide_x + 10, prog_bar_y), (guide_x + 10 + fill_w, prog_bar_y + 8),
+                     prog_color, -1)
+
+        # Label de status da confirmacao
+        if self.fast_confirmed_pending:
+            status_label = "CONFIRMING..."
+            status_clr = (100, 255, 200)
+        elif window_elapsed < self.fast_min_scan_time:
+            status_label = "SCANNING..."
+            status_clr = (150, 180, 180)
+        elif self.fast_stability_time > 0:
+            status_label = "STABILIZING..."
+            status_clr = (150, 200, 200)
+        else:
+            status_label = "HOLD STEADY"
+            status_clr = (150, 180, 180)
+        cv2.putText(output, status_label, (guide_x + 10, guide_y + 95),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.28, status_clr, 1, cv2.LINE_AA)
+
+        # Atalho para confirmar manualmente
+        cv2.putText(output, "[SPACE] confirm", (guide_x + 85, guide_y + 95),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.22, (100, 120, 120), 1, cv2.LINE_AA)
 
         # ═══════════════════════════════════════
         # INDICADORES DE FLUIDO (overlay central)
@@ -3248,6 +3474,38 @@ class AIProcessor:
                          (100, 100, 180), 2)
             cv2.putText(output, "LOW QUALITY - ADJUST", (w//2 - 78, alert_y + 20),
                        cv2.FONT_HERSHEY_DUPLEX, 0.38, (180, 180, 220), 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════
+        # EXAM COMPLETE (quando todas as janelas checadas)
+        # ═══════════════════════════════════════
+
+        if total_checked >= 4:
+            # Banner de exame completo
+            banner_y = h // 2 - 30
+            banner_h = 60
+
+            overlay = output.copy()
+            cv2.rectangle(overlay, (w//2 - 120, banner_y), (w//2 + 120, banner_y + banner_h),
+                         (20, 80, 20), -1)
+            cv2.addWeighted(overlay, 0.9, output, 0.1, 0, output)
+
+            # Borda pulsante
+            pulse = int(abs(np.sin(now * 2)) * 255)
+            cv2.rectangle(output, (w//2 - 120, banner_y), (w//2 + 120, banner_y + banner_h),
+                         (100, pulse, 100), 3)
+
+            cv2.putText(output, "EXAM COMPLETE", (w//2 - 85, banner_y + 25),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.7, (150, 255, 150), 2, cv2.LINE_AA)
+
+            # Resultado final
+            if total_fluid > 0:
+                result_text = f"POSITIVE ({total_fluid} views)"
+                result_color = (100, 150, 255)
+            else:
+                result_text = "NEGATIVE"
+                result_color = (150, 255, 150)
+            cv2.putText(output, result_text, (w//2 - 55, banner_y + 48),
+                       cv2.FONT_HERSHEY_DUPLEX, 0.45, result_color, 1, cv2.LINE_AA)
 
         self._draw_auto_gain_status(output, 20, 60, gain_info, color=(200, 190, 130))
 

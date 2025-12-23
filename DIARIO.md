@@ -1,32 +1,48 @@
 # DIARIO DE DESENVOLVIMENTO - APLICATIVO USG FINAL
 
 ====================================================================
-## 2025-12-23 - Sessao 20: SCAN Q Gating em FAST/LUNG/BLADDER/CARDIAC
+## 2025-12-23 - Sessao 20: SCAN Q Gating + FAST Auto-Navegacao Premium
 ====================================================================
 
 ### Resumo
 Implementacao de gating por qualidade de imagem (SCAN Q) em todos os
-plugins clinicos principais. Quando a qualidade da imagem esta abaixo
-de 35%, as deteccoes sao suspensas para evitar falsos positivos.
+plugins clinicos principais + sistema completo de auto-navegacao para FAST.
 
-### Melhorias Principais
+### PARTE 1: SCAN Q Gating (FAST/LUNG/BLADDER/CARDIAC)
+Quando a qualidade da imagem esta abaixo de 35%, as deteccoes sao suspensas
+para evitar falsos positivos.
+
 1. **FAST**: gating por SCAN Q - ignora deteccao de fluido em baixa qualidade
 2. **LUNG**: gating por SCAN Q - nao atualiza contagem de B-lines em baixa qualidade
 3. **BLADDER**: gating por SCAN Q - ignora deteccao de bexiga em baixa qualidade
 4. **CARDIAC**: gating por SCAN Q - nao atualiza historico de EF em baixa qualidade
-5. **Indicador visual**: todos os 4 plugins mostram "LOW QUALITY - ADJUST" quando qualidade < 35%
+5. **Indicador visual**: todos mostram "LOW QUALITY - ADJUST" quando qualidade < 35%
+
+### PARTE 2: FAST Auto-Navegacao Premium
+Sistema completo de navegacao automatica entre as 4 janelas do FAST.
+
+1. **Auto-confirmacao**: janela confirmada apos 3s de scan + 2.5s de score estavel
+2. **Timer por janela**: mostra tempo gasto em cada view no canto superior direito
+3. **Barra de progresso**: visual do progresso para confirmacao (SCANNING → STABILIZING → CONFIRMING)
+4. **Navegacao manual**: teclas < > para mudar janela, SPACE para confirmar
+5. **Feedback sonoro**: Pop.aiff ao confirmar janela, Glass.aiff ao completar exame
+6. **EXAM COMPLETE**: banner central pulsante quando todas as 4 janelas checadas
+7. **Tempo por janela**: exibe segundos gastos em cada janela confirmada no painel
 
 ### Arquivos Modificados
-- `src/ai_processor.py` - gating e indicadores visuais em FAST/LUNG/BLADDER/CARDIAC
+- `src/ai_processor.py` - gating, auto-navegacao, sons, visuais
+- `main.py` - atalhos de teclado FAST (< > SPACE)
+
+### Atalhos FAST
+- `<` ou `,` - janela anterior
+- `>` ou `.` - proxima janela
+- `SPACE` - confirmar janela manualmente
 
 ### Detalhes Tecnicos
-- Threshold de qualidade: 35% (configuravel via `quality_threshold`)
-- Quando `low_quality_mode = True`:
-  - FAST: `fluid_detected = False`
-  - LUNG: usa ultimo `severity_score` valido
-  - BLADDER: `contour_to_draw = None`
-  - CARDIAC: nao adiciona ao `cardiac_history`
-- Cores do alerta adaptadas por plugin (FAST=azul, LUNG=verde, BLADDER=roxo, CARDIAC=vermelho)
+- Threshold de qualidade: 35%
+- Tempo minimo de scan: 3.0s
+- Threshold de estabilidade: 2.5s
+- Sons via `afplay` (macOS nativo, nao bloqueante)
 
 ====================================================================
 ## 2025-12-22 - Sessao 19: Commit Geral (datasets/checkpoints)

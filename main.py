@@ -994,6 +994,40 @@ class USGApp:
         block_id = self.nerve_block_ids[self.nerve_block_idx]
         return self.nerve_block_names.get(block_id, block_id)[:25]
 
+    # =========================================================================
+    # FAST PROTOCOL - Navegacao de Janelas
+    # =========================================================================
+
+    def _fast_next_window(self):
+        """Avanca para a proxima janela do FAST."""
+        if self.ai_processor:
+            order = self.ai_processor.fast_window_order
+            current_idx = order.index(self.ai_processor.fast_current_window)
+            next_idx = (current_idx + 1) % len(order)
+            next_win = order[next_idx]
+            self.ai_processor._fast_navigate_to(next_win)
+            print(f"FAST: {next_win}")
+
+    def _fast_prev_window(self):
+        """Volta para a janela anterior do FAST."""
+        if self.ai_processor:
+            order = self.ai_processor.fast_window_order
+            current_idx = order.index(self.ai_processor.fast_current_window)
+            prev_idx = (current_idx - 1) % len(order)
+            prev_win = order[prev_idx]
+            self.ai_processor._fast_navigate_to(prev_win)
+            print(f"FAST: {prev_win}")
+
+    def _fast_confirm_window(self):
+        """Confirma a janela atual do FAST manualmente."""
+        if self.ai_processor:
+            current = self.ai_processor.fast_current_window
+            if self.ai_processor.fast_windows[current]['status'] != 'checked':
+                self.ai_processor._fast_confirm_current_window()
+                print(f"FAST: {current} CONFIRMED")
+            else:
+                print(f"FAST: {current} already checked")
+
     def _toggle_overlays(self):
         self.show_overlays = not self.show_overlays
 
@@ -2004,17 +2038,25 @@ class USGApp:
             # NERVE TRACK v2.0 - Navegação de Bloqueios (<, >, n)
             # ═══════════════════════════════════════════════════════════════════════
             elif k == ord(',') or k == ord('<'):
-                # Bloqueio anterior (quando NERVE ativo)
+                # Bloqueio anterior (NERVE) ou Janela anterior (FAST)
                 if self.plugin_idx == 1:  # NERVE
                     self._prev_nerve_block()
+                elif self.plugin_idx == 4:  # FAST
+                    self._fast_prev_window()
             elif k == ord('.') or k == ord('>'):
-                # Próximo bloqueio (quando NERVE ativo)
+                # Próximo bloqueio (NERVE) ou Próxima janela (FAST)
                 if self.plugin_idx == 1:  # NERVE
                     self._next_nerve_block()
+                elif self.plugin_idx == 4:  # FAST
+                    self._fast_next_window()
             elif k == ord('n'):
                 # Mostrar/esconder menu de bloqueios (quando NERVE ativo)
                 if self.plugin_idx == 1:  # NERVE
                     self._toggle_nerve_block_menu()
+            elif k == ord(' '):  # SPACE
+                # Confirmar janela FAST manualmente
+                if self.plugin_idx == 4:  # FAST
+                    self._fast_confirm_window()
             elif k == 13 or k == 10:  # ENTER
                 # Selecionar bloco atual e fechar menu
                 if self.nerve_block_show_menu:

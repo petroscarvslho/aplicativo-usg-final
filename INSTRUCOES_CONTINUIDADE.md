@@ -252,12 +252,18 @@ Arquivos de pesquisa em:
 ### Implementado na Sessao 20:
 - SCAN Q Gating em FAST/LUNG/BLADDER/CARDIAC (qualidade < 35% = deteccoes suspensas)
 - Indicador visual "LOW QUALITY - ADJUST" quando qualidade baixa
+- FAST Auto-Navegacao Premium:
+  - Auto-confirmacao de janelas (3s scan + 2.5s estavel)
+  - Timer por janela + barra de progresso
+  - Feedback sonoro (Pop.aiff/Glass.aiff)
+  - Banner "EXAM COMPLETE" pulsante
+  - Atalhos: < > (navegar), SPACE (confirmar)
 
 ### Proximos passos recomendados (ordem sugerida)
-1. FAST: opcional auto-check de janela (navegacao automatica entre views)
-2. Testar gating em cenarios reais para calibrar threshold (atualmente 35%)
-3. Voice controls para operacao hands-free (freeze, record, modos)
-4. Geracao de relatorios PDF com capturas e medicoes
+1. Testar FAST auto-navegacao em cenarios reais
+2. Voice controls para operacao hands-free (freeze, record, modos)
+3. Geracao de relatorios PDF com capturas e medicoes
+4. Integracao com Siri/voz nativa do macOS
 
 ====================================================================
 ## PROJETOS RELACIONADOS
