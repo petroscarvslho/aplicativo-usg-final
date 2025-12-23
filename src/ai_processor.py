@@ -14,6 +14,7 @@ import os
 import json
 import logging
 import subprocess
+
 import threading
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any, Deque
@@ -24,6 +25,9 @@ from src.ui_utils import (
     draw_labeled_value, draw_structure_list, draw_scan_quality,
     draw_warning_banner, draw_legend, FONT, FONT_SCALE_LABEL, FONT_SCALE_SMALL
 )
+
+# Configurar logger
+logger = logging.getLogger('USG_FLOW')
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KALMAN FILTER para Needle Tracking (Fase 1 - Otimização Premium)
