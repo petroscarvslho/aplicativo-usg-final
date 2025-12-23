@@ -30,3 +30,11 @@ captures/*.mp4
 captures/*.avi
 models/*.pt
 !models/.gitkeep
+
+# Datasets grandes (não versionar)
+datasets/unified/raw/
+datasets/unified/processed/
+datasets/unified/exports/
+training/checkpoints/
+*.npy
+*.pth
